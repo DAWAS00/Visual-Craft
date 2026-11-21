@@ -68,7 +68,7 @@ pub use edit::label_of;
 pub(crate) use edit::{copied_items, copy_map, rejoin};
 use edit::{label_cmd, set_color, set_style};
 pub(crate) use items::add_text;
-pub use items::{CONNECTED_GAP, connected_place};
+pub use items::{CONNECTED_GAP, connected_place, connected_size};
 pub use items::{STICKY_TEXT_SIZE, edit_text, owner_of_text, text_of};
 use items::{add_connected, ink_cmd, next_sticky, shape_cmd, stamp_cmd, sticky_cmd};
 pub(crate) use mindmap::settle_mind_maps;
@@ -151,7 +151,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "board.addConnected",
             "Add connected shape",
-            "{id? (a sticky or shape; default the selected or edited one), side?: right|below|left|above (default right), at? ([x, y] on the page: the next one's centre, anywhere, instead of its place on that side; the connector then leaves by `side` and arrives by the side facing it), edit? (start typing in it; default false)} → {id, text, connector}  the next one of the same kind, size and colour on that side, joined by a connector",
+            "{id? (a sticky or shape; default the selected or edited one), side?: right|below|left|above (default right), at? ([x, y] on the page: the next one's centre, anywhere, instead of its place on that side; the connector then leaves by `side` and arrives by the side facing it), edit? (start typing in it; default false), shape? (a shape source only: the next one's shape, rectangle|roundedRectangle|diamond|…; default the source's), label? (the connector's text, at most 120 characters)} → {id, text, connector, label?}  the next one of the same kind, size and colour on that side (a diamond chosen for another shape at least 160×120), joined by a connector; all of it checked before anything changes",
             true,
             add_connected
         ),

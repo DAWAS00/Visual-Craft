@@ -1,4 +1,5 @@
 use super::connectors::{CAPS, make};
+use super::edit::set_label;
 use super::{
     AUTHOR_INK, Affine, AutoLayout, BlendMode, BoardItem, BoardShape, Color, Connector, Constraints, CrossAlign, Document, Effect, EffectKind, End,
     EngineError, HConstraint, HIGHLIGHTER, INK, LayoutMode, MARKER, MainAlign, Node, NodeId, NodeKind, Paint, Result, SHAPE, STAMP_SIZE, STICKY,
@@ -191,22 +192,117 @@ pub fn connected_place(at: (f64, f64), size: (f64, f64), next: (f64, f64), side:
         _ => return None,
     })
 }
+/// The most characters a connector's label may hold (the plan's MAX_LABEL_CHARS).
+pub const MAX_LABEL_CHARS: usize = 120;
 
-/// `board.addConnected`: the next sticky or shape on a side of one, of the same kind, size and
-/// colour, joined to it by a connector the way the connector tool makes one; one undo step.
+/// The smallest size a Decision made from the chooser takes, so its text fits its inset.
+const DECISION_MIN: (f64, f64) = (160.0, 120.0);
+
+/// The size of the next shape `board.addConnected` makes from a `source` shape of `size`: the
+/// same size, except that a diamond chosen for a shape that isn't one is at least
+/// [`DECISION_MIN`]. A click on "+" (no choice) copies the source, a small diamond included. The
+/// canvas uses this for the preview of each choice.
+pub fn connected_size(source: BoardShape, size: (f64, f64), choice: Option<BoardShape>) -> (f64, f64) {
+    match choice {
+        Some(BoardShape::Diamond) if source != BoardShape::Diamond => (size.0.max(DECISION_MIN.0), size.1.max(DECISION_MIN.1)),
+        _ => size,
+    }
+}
+
+/// An optional text parameter: absent or null is `None`, a string is itself, anything else is
+/// refused (a client sending `shape: 3` hears about it instead of getting the source's shape).
+fn text_param<'a>(cmd: &str, p: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(v)) => Ok(Some(v)),
+        Some(_) => Err(bad(cmd, format!("`{key}` is text"))),
+    }
+}
+
+/// What `board.addConnected` will make, resolved and checked before anything changes.
+struct NextPlan {
+    from: NodeId,
+    from_side: Side,
+    to_side: Side,
+    to_at: (f64, f64),
+    parent: NodeId,
+    page: NodeId,
+    /// `None`: a sticky.
+    shape: Option<BoardShape>,
+    next: (f64, f64),
+    color: Color,
+    author: String,
+    sticky_size: f64,
+    routing: figcraft_doc::Routing,
+    label: Option<String>,
+}
+
+/// The layers `board.addConnected` made.
+struct Built {
+    id: NodeId,
+    text: NodeId,
+    line: NodeId,
+    label: Option<NodeId>,
+}
+
+/// Make the next object and its connector (and label) on `doc`. Used on a copy first, so a
+/// failure is found before the document or the text edit is touched.
+fn build_next(doc: &mut Document, n: &NextPlan) -> Result<Built> {
+    let (id, text) = match n.shape {
+        None => make_sticky(doc, n.parent, n.to_at, "", n.color, &n.author, n.sticky_size)?,
+        Some(shape) => make_shape(doc, n.parent, n.to_at, n.next, shape, "", n.color)?,
+    };
+    let connector = Connector {
+        from: End::Node { node: n.from, side: n.from_side, at: None },
+        to: End::Node { node: id, side: n.to_side, at: None },
+        routing: n.routing,
+        path: None,
+        branch: false,
+    };
+    let line = make(doc, n.page, connector, CAPS)?;
+    let label = match &n.label {
+        Some(text) => set_label(doc, line, text)?,
+        None => None,
+    };
+    Ok(Built { id, text, line, label })
+}
+
+/// `board.addConnected`: the next sticky or shape on a side of one, joined to it by a connector
+/// the way the connector tool makes one; one undo step. `shape` (a shape source only) makes the
+/// next one a different shape, and `label` names the connector.
+///
+/// Everything that can be refused is refused first, with the document and the open text edit
+/// untouched: the parameters, the source, the access, the widget field and the text-on-path draft
+/// (both of which `textedit::end` would otherwise change more than the text), and a dry run of the
+/// whole creation on a copy of the document (which covers the geometry, the connector, the label
+/// and the ids they need). Then the text edit ends and the creation is made for real.
 pub(super) fn add_connected(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "board.addConnected";
     require(s, cmd)?;
-    let editing = s.ds()?.text_edit.as_ref().map(|t| t.id);
+    let choice = text_param(cmd, p, "shape")?.map(|v| shape_of(cmd, v)).transpose()?;
+    let label = match text_param(cmd, p, "label")?.map(str::trim) {
+        // Counted no further than one past the limit, and copied only once accepted.
+        Some(t) if t.chars().nth(MAX_LABEL_CHARS).is_some() => {
+            return Err(bad(cmd, format!("`label` is at most {MAX_LABEL_CHARS} characters")));
+        }
+        Some(t) if !t.is_empty() => Some(t.to_string()),
+        _ => None,
+    };
+    let editing = s.ds()?.text_edit.clone();
     let doc = s.doc()?;
     let from = id(p, "id")
-        .or_else(|| editing.and_then(|t| owner_of_text(doc, t)))
+        .or_else(|| editing.as_ref().and_then(|t| owner_of_text(doc, t.id)))
         .or_else(|| s.selection().first().copied().map(|i| owner_of_text(doc, i).unwrap_or(i)))
         .ok_or_else(|| EngineError::Disabled(cmd.into(), "select a sticky or a shape first".into()))?;
     let n = doc.get(from)?;
     let shape = match &n.board {
-        Some(BoardItem::Sticky { .. }) => None,
-        Some(BoardItem::Shape { shape }) => Some(*shape),
+        Some(BoardItem::Sticky { .. }) => {
+            if choice.is_some() {
+                return Err(bad(cmd, "`shape` is for a shape, not a sticky"));
+            }
+            None
+        }
+        Some(BoardItem::Shape { shape }) => Some(choice.unwrap_or(*shape)),
         _ => return Err(bad(cmd, "that isn't a sticky or a shape")),
     };
     let side = string(p, "side").unwrap_or_else(|| "right".into());
@@ -215,7 +311,13 @@ pub(super) fn add_connected(s: &mut Session, p: &Value) -> Result<Value> {
     let colour_of = |n: &Node| n.fills.iter().find_map(Paint::solid_color);
     let (next, color) = match shape {
         None => ((STICKY, STICKY), colour_of(n)),
-        Some(_) => ((n.width, n.height), n.children.first().and_then(|c| doc.node(*c)).and_then(colour_of)),
+        Some(_) => {
+            let source = match &n.board {
+                Some(BoardItem::Shape { shape }) => *shape,
+                _ => BoardShape::Rectangle,
+            };
+            (connected_size(source, (n.width, n.height), choice), n.children.first().and_then(|c| doc.node(*c)).and_then(colour_of))
+        }
     };
     let color = color.unwrap_or(s.tool.board.sticky);
     let (to_at, from_side, to_side) = connected_place((at.x, at.y), (n.width, n.height), next, &side)
@@ -233,28 +335,65 @@ pub(super) fn add_connected(s: &mut Session, p: &Value) -> Result<Value> {
         }
         None => (to_at, from_side, to_side),
     };
-    let (routing, author, page, size) = (s.tool.board.routing, author(s), s.page()?, s.tool.board.sticky_size);
+    let plan = NextPlan {
+        from,
+        from_side,
+        to_side,
+        to_at,
+        parent,
+        page: s.page()?,
+        shape,
+        next,
+        color,
+        author: author(s),
+        sticky_size: s.tool.board.sticky_size,
+        routing: s.tool.board.routing,
+        label,
+    };
+
+    // Refusals that come before anything is changed.
+    if let Some(why) = s.active_read_only() {
+        return Err(EngineError::Disabled(cmd.into(), why.into()));
+    }
+    if s.ds()?.preview.is_some() {
+        return Err(EngineError::Disabled(cmd.into(), crate::PREVIEW_READ_ONLY.into()));
+    }
+    if let Some(t) = &editing {
+        if crate::widgets::field_of(s.doc()?, t.id).is_some() {
+            return Err(bad(cmd, "finish editing the widget field first"));
+        }
+        // The one end that puts the whole document back (and the ids checked here with it).
+        if textedit::end_restores_document(s) {
+            return Err(bad(cmd, "finish the text first"));
+        }
+    }
+    // The dry run, while a text edit is open: ending the edit and the creation, rehearsed on a copy
+    // of the document, with the checks `execute` makes after a command (instances, library copies,
+    // finite geometry), which would otherwise refuse only once the edit had been committed. Ending
+    // the edit removes at most an emptied free text box (the case that restores the whole document
+    // is refused above), which is never the source, its parent or the page, so what passes here
+    // passes for real too. With no text edit open nothing comes before the creation that the
+    // executor's rollback can't undo, so it is built once.
     if editing.is_some() {
+        let mut dry = s.doc()?.clone();
+        if let Some(t) = textedit::end_removes(s) {
+            // As `end` does it (a failed removal leaves the text where it is).
+            let _ = dry.remove(t);
+        }
+        build_next(&mut dry, &plan)?;
+        s.check_dry_run(cmd, s.doc()?, &dry)?;
         textedit::end(s)?;
     }
-    let doc = s.doc_mut()?;
-    let (id, text) = match shape {
-        None => make_sticky(doc, parent, to_at, "", color, &author, size)?,
-        Some(shape) => make_shape(doc, parent, to_at, next, shape, "", color)?,
-    };
-    let connector = Connector {
-        from: End::Node { node: from, side: from_side, at: None },
-        to: End::Node { node: id, side: to_side, at: None },
-        routing,
-        path: None,
-        branch: false,
-    };
-    let line = make(doc, page, connector, CAPS)?;
-    s.set_selection(vec![id]);
+    let built = build_next(s.doc_mut()?, &plan)?;
+    s.set_selection(vec![built.id]);
     if boolean(p, "edit") == Some(true) {
-        s.request_ui("board.editText", json!({"id": id}));
+        s.request_ui("board.editText", json!({"id": built.id}));
     }
-    Ok(json!({"id": id, "text": text, "connector": line}))
+    let mut out = json!({"id": built.id, "text": built.text, "connector": built.line});
+    if let Some(l) = built.label {
+        out["label"] = json!(l);
+    }
+    Ok(out)
 }
 
 /// `at?` of `board.addConnected`: a point on the page, `[x, y]`, or none.

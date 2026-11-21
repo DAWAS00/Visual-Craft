@@ -530,6 +530,53 @@ fn every_command_survives_junk_params() {
             }
         }
     }
+    // Class diagram commands against a Class page with real IDs, so the junk reaches past the
+    // ID lookups into the parsers, placement, measuring and the renderer.
+    let template = {
+        let mut s = Session::new();
+        s.execute("file.newDiagram", &json!({"type": "class", "template": "libraryLoans"})).unwrap();
+        s.doc().unwrap().clone()
+    };
+    let class_session = || {
+        let mut s = Session::new();
+        s.docs.push(crate::DocState::new(template.clone(), None));
+        s.active = s.docs.len() - 1;
+        s
+    };
+    let m = template.class_diagrams.values().next().cloned().unwrap();
+    let (c1, c2) = (m.classifiers[0].id.0, m.classifiers[1].id.0);
+    let member = m.classifiers.iter().flat_map(|c| c.attributes.iter().map(|a| a.id.0)).next().unwrap();
+    let op = m.classifiers.iter().flat_map(|c| c.operations.iter().map(|o| o.id.0)).next().unwrap();
+    let link = m.links[0].id.0;
+    let long = "x".repeat(5000);
+    let class_junk = [
+        json!({"id": c1, "classifier": c1, "source": c1, "from": c1, "to": c2, "ids": [c1, link], "compartment": "attribute",
+               "text": "\u{0}", "name": long, "kind": 5, "x": 1e308, "y": -1e308, "width": 1e308, "height": -1}),
+        json!({"id": op, "params": [{"name": 1}, {"name": "a", "type": [1]}], "ends": [{"navigable": 7}, 3], "visibility": [],
+               "after": member, "before": op, "relation": "association", "direction": "sideways", "wholeEnd": 3}),
+        json!({"id": link, "kind": "composition", "ends": [{"multiplicity": "\u{202e}", "role": long}, null], "label": {"x": 1}, "stereotype": 5}),
+        json!({"id": c1, "abstract": true, "kind": "enumeration", "showAttributes": "no", "stereotype": "\u{2028}"}),
+        json!({"id": member, "text": "+ ((((", "params": null, "type": null, "default": "\"open", "static": 1}),
+        json!({"source": c2, "relation": "aggregation", "kind": "class", "direction": "in", "wholeEnd": "new", "name": "N",
+               "x": 1e6, "y": 1e6, "ends": [{}, {"navigable": null}]}),
+        json!({"source": c1, "relation": "realization", "kind": "interface", "direction": "out", "name": "I", "label": "x"}),
+        json!({"id": c1, "width": 1e-308, "height": 1e-308, "x": -1e6, "y": 1e6}),
+        json!({"page": 999_999, "id": c1, "ids": [c1, c1, 1e308]}),
+    ];
+    for spec in all_commands().iter().filter(|s| s.id.starts_with("diagram.class.")) {
+        for j in junk.iter().chain(class_junk.iter()) {
+            let mut taken = j.clone();
+            if let (Some(names), Some(o)) = (crate::cmd::param_names(spec.id), taken.as_object_mut()) {
+                o.retain(|k, _| matches!(k.as_str(), "ids" | "id") || names.contains(&k.as_str()));
+            }
+            for params in if taken == *j { vec![j] } else { vec![j, &taken] } {
+                let mut s = class_session();
+                if let Err(EngineError::Internal { cmd, msg }) = s.execute(spec.id, params) {
+                    panic!("{cmd} panicked on {params}: {msg}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

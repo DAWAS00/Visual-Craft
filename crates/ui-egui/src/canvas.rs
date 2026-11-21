@@ -399,6 +399,8 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     }
     crate::dev_mode::draw(app, &painter);
     crate::handles::draw(app, &painter);
+    crate::use_case_panel::canvas::draw(app, &painter);
+    crate::class_panel::canvas::draw(app, &painter);
     crate::board_facilitate::badges(app, &painter);
     crate::board_bar::stamp_author(app, &painter, ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)));
     crate::board_bar::show(app, &ctx);
@@ -422,10 +424,16 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     app.canvas.cursor = None;
     if let (true, Some(at)) = (own_cursor && resp.hovered(), ctx.input(|i| i.pointer.hover_pos())) {
         let panning = app.canvas.space_pan || app.canvas.middle_pan.is_some();
-        let shown = crate::cursors::on_canvas(panning, ctx.input(|i| i.pointer.any_down()), app.canvas.zoom_tool, app.session.tool.overlay.cursor);
+        let shown = match crate::diagram_resize::take_cursor(&ctx) {
+            // A typed diagram's resize square or edge is under the pointer (or being dragged).
+            Some(icon) => crate::cursors::Shown::System(icon),
+            None => crate::cursors::on_canvas(panning, ctx.input(|i| i.pointer.any_down()), app.canvas.zoom_tool, app.session.tool.overlay.cursor),
+        };
         shown.show(&ctx, at);
         app.canvas.cursor = Some(shown);
     }
+    // Asked for while the pointer was off the canvas: not shown later.
+    let _ = crate::diagram_resize::take_cursor(&ctx);
 }
 
 /// The image's screen rect; align native-density renders to device pixels to avoid linear filtering

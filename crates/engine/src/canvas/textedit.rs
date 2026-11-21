@@ -91,6 +91,8 @@ fn text_of(s: &Session, id: NodeId) -> Result<TextData> {
 pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -> Result<()> {
     let t = text_of(s, id)?;
     let n = t.char_count();
+    // A diagram's text comes from its model: it's renamed with the diagram's tools.
+    crate::use_case::gate::refuse_at(s.doc()?, id).map_err(|why| EngineError::Disabled("Edit text".into(), why))?;
     s.begin_interaction("Edit text")?;
     let ds = s.ds_mut()?;
     // Editing the same layer again (a double-click into a text just made) keeps it new.
@@ -104,6 +106,31 @@ pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -
     ds.revision += 1;
     s.live_text_notice(id);
     Ok(())
+}
+
+/// Whether [`end`] would put the whole document back to the gesture's starting snapshot: an
+/// emptied text box made by this edit, with no board object owning it, that the snapshot never had
+/// (the Text on a path tool, which also took the path layer away). A command that ends the edit
+/// and then builds on the document refuses first, since the ids it checked would be gone.
+pub(crate) fn end_restores_document(s: &Session) -> bool {
+    let Ok(ds) = s.ds() else { return false };
+    let Some(te) = &ds.text_edit else { return false };
+    te.created && end_removes(s).is_some() && ds.interaction.as_ref().is_some_and(|it| it.doc.node(te.id).is_none())
+}
+
+/// The text layer [`end`] takes away: the one being edited when it is emptied and no board object
+/// owns it. A command that rehearses ending the edit on a copy of the document removes it there
+/// too, so the executor's checks see the whole change (a text inside an instance can't go).
+pub(crate) fn end_removes(s: &Session) -> Option<NodeId> {
+    let id = s.ds().ok()?.text_edit.as_ref()?.id;
+    emptied_free_text(s, id).then_some(id)
+}
+
+/// Whether the text `id` is one [`end`] removes: emptied, and no board object owns it (a sticky's
+/// note stays when emptied). The one rule for both `end` and its rehearsal, [`end_removes`].
+fn emptied_free_text(s: &Session, id: NodeId) -> bool {
+    let owned = s.doc().ok().and_then(|d| crate::board::owner_of_text(d, id)).is_some();
+    !owned && text_of(s, id).is_ok_and(|t| t.characters.trim().is_empty())
 }
 
 /// Finish editing: an empty new text layer is removed; the session becomes one undo step.
@@ -127,7 +154,7 @@ pub fn end(s: &mut Session) -> Result<()> {
     }
     // A board object's text (a sticky's note) stays when emptied; the object is selected again.
     let owner = s.doc().ok().and_then(|d| crate::board::owner_of_text(d, te.id));
-    let empty = owner.is_none() && text_of(s, te.id).map(|t| t.characters.trim().is_empty()).unwrap_or(false);
+    let empty = emptied_free_text(s, te.id);
     if empty {
         let doc = s.doc_mut()?;
         let _ = doc.remove(te.id);

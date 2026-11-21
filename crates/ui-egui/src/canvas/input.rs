@@ -200,6 +200,19 @@ pub(super) fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> boo
         end_keyboard_box(app, ui.ctx());
         return true;
     }
+    // A Use Case diagram's elements: its layers are locked, so presses on them select, move,
+    // place and connect through the diagram's own commands.
+    if crate::use_case_panel::canvas::input(app, ui, resp) {
+        app.ui.pages_focus = None;
+        end_keyboard_box(app, ui.ctx());
+        return true;
+    }
+    // A Class diagram's cards likewise.
+    if crate::class_panel::canvas::input(app, ui, resp) {
+        app.ui.pages_focus = None;
+        end_keyboard_box(app, ui.ctx());
+        return true;
+    }
     let ctx = ui.ctx().clone();
     // Two fingers pan as well as pinch (a touch screen has no scroll wheel).
     let (mods, pan, zoom_delta, hover_pos, space) = ctx.input(|i| {

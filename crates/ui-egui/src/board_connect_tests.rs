@@ -163,6 +163,9 @@ fn dragging_a_handle_drops_the_next_shape_where_it_is_let_go() {
     u.drag_to(from, to);
     u.button(to, false);
     u.frame(vec![]);
+    assert_eq!(u.app.session.doc().unwrap().ids().count(), before, "nothing is made until a shape is chosen");
+    u.frame(vec![key(egui::Key::Enter)]);
+    u.frame(vec![]);
     let doc = u.app.session.doc().unwrap();
     let next = doc.ids().find(|i| *i != a && matches!(doc.node(*i).unwrap().board, Some(BoardItem::Shape { .. }))).expect("a new shape");
     let line = doc.ids().find(|i| matches!(doc.node(*i).unwrap().board, Some(BoardItem::Connector(_)))).expect("a connector");
@@ -297,6 +300,8 @@ fn the_bar_stays_away_while_a_handle_is_dragged() {
     assert!(bar(&u).is_none(), "no bar while a handle is dragged");
     u.button(to, false);
     u.frame(vec![]);
+    u.frame(vec![key(egui::Key::Enter)]);
+    u.frame(vec![]);
     let doc = u.app.session.doc().unwrap();
     let next = doc.ids().find(|i| *i != a && matches!(doc.node(*i).unwrap().board, Some(BoardItem::Shape { .. }))).expect("a new shape");
     let line = doc.ids().find(|i| matches!(doc.node(*i).unwrap().board, Some(BoardItem::Connector(_)))).expect("a connector");
@@ -308,4 +313,215 @@ fn the_bar_stays_away_while_a_handle_is_dragged() {
     u.frame(vec![]);
     u.frame(vec![]);
     assert!(bar(&u).is_some(), "the bar is back for the new selection");
+}
+
+/// A key pressed (its release is not sent).
+fn key(k: egui::Key) -> Event {
+    Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+}
+
+/// Drag a "+" below `a` and let go at the point `to`, on empty board: the chooser opens there.
+fn drop_below(u: &mut Ui, a: NodeId) -> Pos2 {
+    u.app.session.execute("select.set", &json!({"ids": [a]})).unwrap();
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let from = handle(u, "below").expect("a handle below").center();
+    // Above the floating toolbar at the bottom of the canvas (a drop there is refused).
+    let to = from + egui::vec2(260.0, 60.0);
+    u.drag_to(from, to);
+    u.button(to, false);
+    u.frame(vec![]);
+    to
+}
+
+/// The page's shapes and connectors, to check that a dismissed chooser made nothing.
+fn layers(u: &Ui) -> usize {
+    u.app.session.doc().unwrap().ids().count()
+}
+
+/// Escape closes the chooser and nothing is made or moved; Down before it only moves the row.
+#[test]
+fn escape_leaves_the_chooser_and_the_source_where_it_was() {
+    let (mut u, a) = board_with_shape();
+    let before = (layers(&u), u.app.session.doc().unwrap().node(a).unwrap().transform, u.app.session.undo_labels(usize::MAX).len());
+    drop_below(&mut u, a);
+    u.frame(vec![key(egui::Key::ArrowDown)]);
+    u.frame(vec![key(egui::Key::Escape)]);
+    u.frame(vec![]);
+    let doc = u.app.session.doc().unwrap();
+    assert_eq!(layers(&u), before.0, "nothing made");
+    assert_eq!(doc.node(a).unwrap().transform, before.1, "the source did not move (the arrow was the chooser's)");
+    assert_eq!(u.app.session.undo_labels(usize::MAX).len(), before.2, "no undo step");
+}
+
+/// Down twice and Enter makes a Decision (a diamond at least 160 by 120), centred where the "+"
+/// was let go, joined by a connector, typing started; one undo takes both away.
+#[test]
+fn the_keyboard_chooses_a_decision_where_it_was_let_go() {
+    let (mut u, a) = board_with_shape();
+    let before = layers(&u);
+    let to = drop_below(&mut u, a);
+    u.frame(vec![key(egui::Key::ArrowDown)]);
+    u.frame(vec![key(egui::Key::ArrowDown)]);
+    u.frame(vec![key(egui::Key::Enter)]);
+    u.frame(vec![]);
+    let doc = u.app.session.doc().unwrap();
+    let next = doc
+        .ids()
+        .find(|i| *i != a && matches!(doc.node(*i).unwrap().board, Some(BoardItem::Shape { shape: figcraft_doc::BoardShape::Diamond })))
+        .expect("a diamond");
+    let n = doc.node(next).unwrap();
+    assert!(n.width >= 160.0 && n.height >= 120.0, "at least 160 by 120");
+    assert!((screen_box(&u, next).center() - to).length() < 1.0, "centred where it was let go");
+    assert!(u.app.session.ds().unwrap().text_edit.is_some(), "typing in the new shape");
+    figcraft_engine::textedit::end(&mut u.app.session).unwrap();
+    u.app.session.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(layers(&u), before, "undo takes the shape, its connector and the chosen shape away");
+}
+
+/// Whether the chooser showed last frame.
+fn chooser_shown(u: &Ui) -> bool {
+    let layer = LayerId::new(Order::Foreground, Id::unique("board_connect_chooser_area"));
+    u.ctx.memory(|m| m.areas().visible_last_frame(&layer))
+}
+
+/// A press outside the chooser closes it, even one that keeps the source selected (on the source
+/// itself), and Enter after it is no longer the chooser's.
+#[test]
+fn a_press_outside_closes_the_chooser_and_makes_nothing() {
+    let (mut u, a) = board_with_shape();
+    let before = layers(&u);
+    drop_below(&mut u, a);
+    assert!(chooser_shown(&u), "the chooser opened");
+    let on_source = screen_box(&u, a).center();
+    click(&mut u, on_source);
+    u.frame(vec![]);
+    assert!(!chooser_shown(&u), "the press outside closed it");
+    assert_eq!(u.app.session.selection(), vec![a], "the source is still selected");
+    assert!(handle(&u, "below").is_some(), "its handles are back");
+    u.frame(vec![key(egui::Key::Enter)]);
+    u.frame(vec![]);
+    let doc = u.app.session.doc().unwrap();
+    assert!(!doc.ids().any(|i| i != a && matches!(doc.node(i).unwrap().board, Some(BoardItem::Shape { .. }))), "no shape made");
+    assert_eq!(layers(&u), before, "nothing made, nothing taken away");
+}
+
+/// Keys that come in one frame count in their order: Down, Down, Enter is a Decision, and Escape
+/// before Enter makes nothing.
+#[test]
+fn keys_in_one_frame_count_in_their_order() {
+    let diamonds = |u: &Ui| {
+        let doc = u.app.session.doc().unwrap();
+        doc.ids().filter(|i| matches!(doc.node(*i).unwrap().board, Some(BoardItem::Shape { shape: figcraft_doc::BoardShape::Diamond }))).count()
+    };
+    let (mut u, a) = board_with_shape();
+    let before = layers(&u);
+    drop_below(&mut u, a);
+    u.frame(vec![key(egui::Key::Escape), key(egui::Key::Enter)]);
+    u.frame(vec![]);
+    assert_eq!(layers(&u), before, "Escape came first: nothing made");
+    drop_below(&mut u, a);
+    u.frame(vec![key(egui::Key::ArrowDown), key(egui::Key::ArrowDown), key(egui::Key::Enter)]);
+    u.frame(vec![]);
+    assert_eq!(diamonds(&u), 1, "Down, Down, Enter: the Decision");
+}
+
+/// A click on a row makes that shape: the third row, Decision, makes a diamond, and the canvas
+/// under the chooser starts nothing.
+#[test]
+fn clicking_a_row_makes_that_shape() {
+    let (mut u, a) = board_with_shape();
+    drop_below(&mut u, a);
+    u.frame(vec![]);
+    let area = u.ctx.memory(|m| m.area_rect(Id::unique("board_connect_chooser_area"))).expect("the chooser's box");
+    // Four rows of equal height: the middle of the third.
+    let row = pos2(area.center().x, area.min.y + area.height() * 2.5 / 4.0);
+    u.frame(vec![Event::PointerMoved(row)]);
+    click(&mut u, row);
+    let doc = u.app.session.doc().unwrap();
+    assert!(
+        doc.ids().any(|i| matches!(doc.node(i).unwrap().board, Some(BoardItem::Shape { shape: figcraft_doc::BoardShape::Diamond }))),
+        "the click made the Decision"
+    );
+    assert!(!chooser_shown(&u), "and closed the chooser");
+}
+
+/// Escape and a row's click in the same frame: Escape wins and nothing is made.
+#[test]
+fn escape_wins_over_a_row_click_in_the_same_frame() {
+    let (mut u, a) = board_with_shape();
+    let before = layers(&u);
+    drop_below(&mut u, a);
+    // A new area's first frame is egui's sizing pass: read where it settles after it.
+    u.frame(vec![]);
+    let area = u.ctx.memory(|m| m.area_rect(Id::unique("board_connect_chooser_area"))).expect("the chooser's box");
+    let row = pos2(area.center().x, area.min.y + 14.0);
+    // Over the row first, as a mouse is, then pressed.
+    u.frame(vec![Event::PointerMoved(row)]);
+    u.frame(vec![Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+    assert!(!u.app.session.tool.busy(), "the canvas under the chooser started nothing");
+    assert!(chooser_shown(&u), "a press on a row keeps it open");
+    u.frame(vec![
+        key(egui::Key::Escape),
+        Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ]);
+    u.frame(vec![]);
+    assert_eq!(layers(&u), before, "nothing made");
+}
+
+/// A chooser belongs to its file: in another tab, where a shape with the same id is selected,
+/// Enter makes nothing there.
+#[test]
+fn the_chooser_stays_with_its_file() {
+    let (mut u, a) = board_with_shape();
+    drop_below(&mut u, a);
+    assert!(chooser_shown(&u), "the chooser opened");
+    // Another board, its first shape getting the same id as the source, selected.
+    u.app.session.execute("file.newBoard", &json!({})).unwrap();
+    let b = id(&u.app.session.execute("board.shape", &json!({"shape": "rectangle", "x": 0, "y": 0, "width": 160, "height": 100})).unwrap());
+    assert_eq!(b, a, "the same id in the other file");
+    u.app.session.execute("select.set", &json!({"ids": [b]})).unwrap();
+    let before = layers(&u);
+    u.frame(vec![]);
+    u.frame(vec![key(egui::Key::Enter)]);
+    u.frame(vec![]);
+    assert!(!chooser_shown(&u), "closed in the other file");
+    assert_eq!(layers(&u), before, "nothing made in the other file");
+}
+
+/// The control channel's `ui.key` (which runs canvas bindings itself) gives the open chooser its
+/// keys too: Down, Down, Enter makes a Decision and the source is not nudged.
+#[test]
+fn ui_key_goes_to_the_open_chooser_before_the_canvas() {
+    let (mut u, a) = board_with_shape();
+    let at = u.app.session.doc().unwrap().node(a).unwrap().transform;
+    drop_below(&mut u, a);
+    for k in ["ArrowDown", "ArrowDown", "Enter"] {
+        crate::control::handle(&mut u.app, &u.ctx, "ui.key", &json!({"key": k})).unwrap();
+        u.frame(vec![]);
+    }
+    let doc = u.app.session.doc().unwrap();
+    assert_eq!(doc.node(a).unwrap().transform, at, "the arrows were the chooser's, not a nudge");
+    assert!(
+        doc.ids().any(|i| matches!(doc.node(i).unwrap().board, Some(BoardItem::Shape { shape: figcraft_doc::BoardShape::Diamond }))),
+        "Enter made the Decision"
+    );
+}
+
+/// A sticky's next one is still made where it is let go, with no chooser (only shapes choose).
+#[test]
+fn a_sticky_still_makes_its_next_sticky_where_it_is_let_go() {
+    let mut s = Session::new();
+    s.execute("file.newBoard", &json!({})).unwrap();
+    let a = id(&s.execute("board.sticky", &json!({"x": 0, "y": 0, "text": "Idea"})).unwrap());
+    let mut u = Ui::new(s);
+    u.frame(vec![]);
+    let view = &mut u.app.session.ds_mut().unwrap().view;
+    (view.zoom, view.cx, view.cy) = (1.0, 80.0, 50.0);
+    u.frame(vec![]);
+    let before = layers(&u);
+    drop_below(&mut u, a);
+    let doc = u.app.session.doc().unwrap();
+    assert!(doc.ids().any(|i| matches!(doc.node(i).unwrap().board, Some(BoardItem::Sticky { .. })) && i != a), "a sticky was made at once");
+    assert!(layers(&u) > before, "made without a choice");
 }

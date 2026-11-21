@@ -99,7 +99,7 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         });
     }
     let summary = import_summary(&loaded.doc);
-    let images_left_out = if native { loaded.images_past_budget } else { 0 };
+    let images_left_out = if native { loaded.images_past_budget + loaded.history_past_budget } else { 0 };
     let mut ds = DocState::new(loaded.doc, native.then(|| path.clone()))
         .with_versions(loaded.versions)
         .with_branches(loaded.branches)
@@ -124,7 +124,7 @@ pub(super) fn revert(s: &mut Session) -> Result<()> {
         *slot = DocState::new(loaded.doc, Some(path.clone()))
             .with_versions(loaded.versions)
             .with_branches(loaded.branches)
-            .with_images_left_in_file(&path, loaded.images_past_budget);
+            .with_images_left_in_file(&path, loaded.images_past_budget + loaded.history_past_budget);
         slot.on_disk = on_disk;
     }
     // Edits on its branch tabs are reverted too.
@@ -193,6 +193,13 @@ pub(super) fn import(s: &mut Session, p: &Value) -> Result<Value> {
             };
             let sibling = if variables.is_none() { path.as_deref().and_then(sibling_variables) } else { None };
             let (other, rest) = load_with(&bytes, &name, variables.as_ref().or(sibling.as_ref()), images)?;
+            // A diagram page can't be appended yet: its model and IDs would have to join this file's.
+            if other.doc.has_typed_records() {
+                return Err(EngineError::Disabled(
+                    "file.import".into(),
+                    format!("{} has diagram pages, which can't be imported into another file yet: open it instead", file_stem(&name)),
+                ));
+            }
             let summary = import_summary(&other.doc);
             let pages = append_pages(s.doc_mut()?, &other.doc)?;
             if !other.issues.is_empty() {

@@ -424,12 +424,17 @@ impl FigApp {
         branch_ui::keys(self, &ctx);
         live::dialog_keys(self, &ctx);
         dialogs::keys(self, &ctx);
+        crate::use_case_panel::canvas::keys(self, &ctx);
+        crate::class_panel::canvas::keys(self, &ctx);
         shortcuts::handle_input(self, &ctx, typing, paste, ime_input, field_save);
         menus::popups(self, &ctx);
         variable_ui::picker(self, &ctx);
         style_picker::show(self, &ctx);
         self.end_unwanted_text_preview(&ctx);
         self.end_pen_outside_design();
+        crate::use_case_panel::handles::show(self, &ctx);
+        crate::use_case_panel::show(self, &ctx);
+        crate::class_panel::show(self, &ctx);
         dialogs::show(self, &ctx);
         updates_ui::show(self, &ctx);
         // A scrub that changed speed (the pointer moved up or down) says so at the bottom.

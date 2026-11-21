@@ -79,8 +79,13 @@ impl Session {
 
     /// Install a document that came from the session (others' edits): the selection, page and view
     /// stay where they can, and the undo history isn't touched.
-    pub fn apply_remote(&mut self, uid: u64, doc: Arc<Document>) {
+    pub fn apply_remote(&mut self, uid: u64, mut doc: Arc<Document>) {
         let Some(old) = self.docs.iter().find(|d| d.uid == uid).map(|d| d.doc.clone()) else { return };
+        // A board's style isn't part of the session (others see a plain board), so the session's
+        // copy never has it: this tab keeps its own.
+        if doc.board_style != old.board_style {
+            Arc::make_mut(&mut doc).board_style = old.board_style;
+        }
         // Edits merged from others can close a loop of components containing each other.
         let changed = crate::derived::changed_nodes(&doc, &old);
         if let Some(names) = crate::components::new_cycle(&old, &doc, changed.iter()) {

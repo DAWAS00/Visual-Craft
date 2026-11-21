@@ -33,6 +33,10 @@ pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 pub mod ui_scale;
+pub mod use_case_panel;
+pub mod class_panel;
+pub mod diagram_kit;
+pub mod diagram_resize;
 pub mod widgets;
 pub mod windows;
 
@@ -45,7 +49,13 @@ mod board_picker_tests;
 #[cfg(test)]
 mod board_ui_tests;
 #[cfg(test)]
+mod new_diagram_tests;
+#[cfg(test)]
 mod theme_startup_tests;
+#[cfg(test)]
+mod use_case_panel_tests;
+#[cfg(test)]
+mod class_panel_tests;
 
 #[cfg(test)]
 mod a11y_tests;
@@ -346,6 +356,7 @@ pub use dialogs::branch_ui;
 pub use dialogs::credits;
 pub use dialogs::import_report;
 pub use dialogs::missing_fonts;
+pub use dialogs::new_diagram;
 pub use dialogs::plugins_ui;
 pub use dialogs::sampled_color;
 pub use dialogs::updates_ui;
@@ -579,6 +590,8 @@ pub struct UiState {
     pub pdf_print: figcraft_doc::PrintSettings,
     /// The Color profile dialog is open, with this profile chosen.
     pub color_profile: Option<figcraft_color::ColorProfile>,
+    /// The New diagram dialog is open, with this choice.
+    pub new_diagram: Option<new_diagram::NewDiagramUi>,
     /// The open style picker.
     pub style_picker: Option<style_picker::Picker>,
     /// The style picker's popover while it is open (its place survives a drag).
@@ -748,6 +761,7 @@ impl Default for UiState {
             export_preview: false,
             pdf_print: figcraft_doc::PrintSettings::default(),
             color_profile: None,
+            new_diagram: None,
             style_picker: None,
             style_picker_popover: None,
             style_grid: false,

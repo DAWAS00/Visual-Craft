@@ -108,6 +108,7 @@ impl FigApp {
         // Set apart from the literal above, which is at the macro recursion limit.
         state["uiScale"] = json!({"choice": self.session.prefs.ui_scale, "zoom": self.ui.ui_scale.zoom, "drawn": self.ui.ui_scale.drawn, "limited": self.ui.ui_scale.limited});
         state["pendingOpens"] = json!(self.ui.pending_opens.len());
+        state["newDiagramDialog"] = json!(self.ui.new_diagram.as_ref().map(crate::new_diagram::params));
         state["missingFonts"] = json!(self.ui.missing_fonts.as_ref().map(missing_fonts::Shown::inspect));
         state["presentTabs"] = tabs::present_tabs_inspect(self);
         state["frameTimes"] = self.frame_stats.times();

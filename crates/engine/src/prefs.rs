@@ -123,6 +123,18 @@ pub struct Prefs {
     /// for updates by themselves. A file naming another one doesn't contact its server (#1097).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub team_libraries: Vec<String>,
+    /// Typed diagrams (Use Case and Class) are a preview: `file.newDiagram` makes them only while
+    /// this is on (files holding one are saved as format version 2). `None`: on in development
+    /// builds, off in release builds ([`Prefs::diagram_preview_on`]); `pref.diagramPreview` sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagram_preview: Option<bool>,
+}
+
+impl Prefs {
+    /// Whether typed diagrams may be made ([`Prefs::diagram_preview`]).
+    pub fn diagram_preview_on(&self) -> bool {
+        self.diagram_preview.unwrap_or(cfg!(debug_assertions))
+    }
 }
 
 /// Recently run actions kept for the Actions palette (newest first).
@@ -165,6 +177,7 @@ impl Default for Prefs {
             board_grid: Default::default(),
             recent_actions: Vec::new(),
             team_libraries: Vec::new(),
+            diagram_preview: None,
         }
     }
 }

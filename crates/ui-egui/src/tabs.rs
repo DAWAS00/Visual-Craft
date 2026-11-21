@@ -188,7 +188,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
             let progress = open_progress(&opening, d.uid, now);
             let tab = TabPaint {
                 name,
-                kind: d.doc.kind,
+                mark: icons::doc_mark(&d.doc),
                 rects: [r, close_r],
                 width: w,
                 state: [active, resp.hovered(), cresp.hovered(), dirty],
@@ -463,7 +463,8 @@ fn tab_label(name: &str, live: Option<bool>) -> String {
 /// What to draw for one document tab.
 struct TabPaint<'a> {
     name: &'a str,
-    kind: figcraft_doc::FileKind,
+    /// Its file's mark (a design file, a board or a diagram).
+    mark: icons::Icon,
     /// The tab, and its close target.
     rects: [Rect; 2],
     width: f32,
@@ -479,7 +480,7 @@ struct TabPaint<'a> {
 
 /// Draws a document tab: background, icon, name, live mark, unsaved dot and close button.
 fn paint_tab(ui: &Ui, t: &Tokens, tab: &TabPaint) {
-    let TabPaint { name, kind, rects: [r, close_r], width: w, state: [active, hovered, close_hovered, dirty], live, lost, progress } = *tab;
+    let TabPaint { name, mark, rects: [r, close_r], width: w, state: [active, hovered, close_hovered, dirty], live, lost, progress } = *tab;
     let mark_w = if live.is_some() || lost { LIVE_MARK_WIDTH } else { 0.0 };
     let paint_r = r.translate(vec2(-28.0 * (1.0 - progress).powi(2), 0.0));
     let painter = ui.painter().with_clip_rect(r);
@@ -491,7 +492,7 @@ fn paint_tab(ui: &Ui, t: &Tokens, tab: &TabPaint) {
     icons::paint(
         &painter,
         Rect::from_center_size(pos2(paint_r.min.x + 17.0, paint_r.center().y), Vec2::splat(BAR_ICON)),
-        icons::file_mark(kind),
+        mark,
         crate::theme::ACCENT.linear_multiply(progress),
     );
     // The unsaved-changes dot follows the name on screen, whichever way the name reads.

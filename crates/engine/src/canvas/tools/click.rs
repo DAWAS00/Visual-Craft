@@ -193,6 +193,8 @@ impl Session {
         }
         // New text at the click (Figma puts the baseline-ish top-left there).
         let parent = frame_at(&doc, page, ev.p(), &[]).unwrap_or(page);
+        // A diagram page takes no ordinary layers: refused before the text is made.
+        crate::use_case::gate::refuse_at(&doc, parent).map_err(|why| crate::EngineError::Disabled("Text".into(), why))?;
         let defaults = self.default_props.text.clone();
         let ds = self.ds_mut()?;
         let d = ds.doc_mut();
@@ -291,6 +293,8 @@ impl Session {
         let Some(pn) = doc.node(path) else { return Ok(()) };
         let (Some(parent), Some(geom)) = (pn.parent, figcraft_doc::geometry::stroke_geometry(pn)) else { return Ok(()) };
         let index = doc.index_in_parent(path);
+        // The text takes the path's place: not on a diagram page, refused before it shows.
+        crate::use_case::gate::refuse_at(&doc, path).map_err(|why| crate::EngineError::Disabled("Text on a path".into(), why))?;
         self.begin_interaction("Text on a path")?;
         let ds = self.ds_mut()?;
         let d = ds.doc_mut();

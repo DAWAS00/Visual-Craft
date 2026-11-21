@@ -65,9 +65,103 @@ fn new_file(s: &mut Session, p: &Value, kind: FileKind) -> Result<Value> {
     Ok(json!({"index": s.active, "kind": kind.id()}))
 }
 
+/// The diagram types `file.newDiagram` makes, and those still to come (refused until then).
+const DIAGRAM_TYPES: [&str; 3] = ["flowchart", crate::use_case::TYPE_ID, crate::class_diagram::TYPE_ID];
+const DIAGRAM_TYPES_LATER: [&str; 1] = ["mindMap"];
+/// Typed diagrams (a model behind the page): a preview, made only while `pref.diagramPreview` is on.
+const DIAGRAM_TYPES_PREVIEW: [&str; 2] = [crate::use_case::TYPE_ID, crate::class_diagram::TYPE_ID];
+/// The templates a new diagram starts from: Blank, or a board template.
+const DIAGRAM_TEMPLATES: [&str; 2] = ["blank", "flowChart"];
+
+/// A new diagram in a tab of its own: a board shown as a diagram, starting from `template`. Every
+/// parameter is checked and the starting content built before the tab is added, so a refusal
+/// leaves the tabs as they were; the content is the new tab's starting state, so undo doesn't take
+/// it away.
+fn new_diagram(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "file.newDiagram";
+    let text = |key: &str| match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(v)) => Ok(Some(v.trim().to_string())),
+        Some(_) => Err(bad(cmd, format!("`{key}` is text"))),
+    };
+    let name = text("name")?.filter(|n| !n.is_empty()).unwrap_or_else(|| "Untitled diagram".into());
+    let kind = text("type")?.unwrap_or_else(|| "flowchart".into());
+    if !s.prefs.diagram_preview_on() && DIAGRAM_TYPES_PREVIEW.iter().any(|t| t.eq_ignore_ascii_case(&kind)) {
+        return Err(EngineError::Disabled(
+            cmd.into(),
+            format!("`{kind}` diagrams are a preview: turn on Preview typed diagrams (pref.diagramPreview) to make one"),
+        ));
+    }
+    if DIAGRAM_TYPES_LATER.iter().any(|t| t.eq_ignore_ascii_case(&kind)) {
+        return Err(bad(cmd, format!("`{kind}` diagrams aren't available yet: one of {}", DIAGRAM_TYPES.join(", "))));
+    }
+    if !DIAGRAM_TYPES.iter().any(|t| t.eq_ignore_ascii_case(&kind)) {
+        return Err(bad(cmd, format!("no diagram type `{kind}`: one of {}", DIAGRAM_TYPES.join(", "))));
+    }
+    let use_case = kind.eq_ignore_ascii_case(crate::use_case::TYPE_ID);
+    let class = kind.eq_ignore_ascii_case(crate::class_diagram::TYPE_ID);
+    let templates: &[&str] = if use_case {
+        &["blank", crate::use_case::EXAMPLE]
+    } else if class {
+        &["blank", crate::class_diagram::EXAMPLE]
+    } else {
+        &DIAGRAM_TEMPLATES
+    };
+    let template = text("template")?.unwrap_or_else(|| "blank".into());
+    let Some(template) = templates.iter().find(|t| t.eq_ignore_ascii_case(&template)).copied() else {
+        return Err(bad(cmd, format!("no template `{template}` for this diagram type: one of {}", templates.join(", "))));
+    };
+    let mut doc = if template == "blank" || use_case || class {
+        let mut doc = Document::new(name.clone());
+        doc.kind = FileKind::Board;
+        for page in doc.pages.clone() {
+            if let Some(NodeKind::Page { background, .. }) = doc.node_mut(page).map(|n| &mut n.kind) {
+                *background = BOARD_PAGE;
+            }
+        }
+        doc
+    } else {
+        crate::board_templates::preview(template).map_err(|e| bad(cmd, format!("the `{template}` template couldn't be made: {e}")))?
+    };
+    doc.name = name;
+    doc.kind = FileKind::Board;
+    doc.board_style = figcraft_doc::BoardStyle::Diagram;
+    if use_case {
+        crate::use_case::start(&mut doc, template)?;
+    } else if class {
+        crate::class_diagram::start(&mut doc, template)?;
+    }
+    // Fitted to the starting content in the default view size, which a canvas still takes for
+    // its first sizing and fits again to its real size (no window's old size is copied here).
+    let mut ds = DocState::new(doc, None);
+    ds.zoom_to_fit();
+    s.docs.push(ds);
+    s.active = s.docs.len() - 1;
+    Ok(
+        json!({"index": s.active, "kind": FileKind::Board.id(), "style": figcraft_doc::BoardStyle::Diagram.id(), "type": if use_case { crate::use_case::TYPE_ID } else if class { crate::class_diagram::TYPE_ID } else { "flowchart" }, "template": template}),
+    )
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         spec!("file.new", "New design file", "{name?}", false, |s, p| new_file(s, p, FileKind::Design)),
+        spec!(
+            "file.newDiagram",
+            "New diagram",
+            "{name?, type? (flowchart, the default, useCase or class; mindMap is not available yet), template? (blank, the default; flowChart for a flowchart, useCaseExample for a use case diagram, libraryLoans for a class diagram)}  a board shown as a diagram, in a tab of its own, starting from the template → {index, kind, style, type, template}",
+            false,
+            new_diagram
+        ),
+        spec!(
+            "dialog.newDiagram",
+            "New diagram…",
+            "{}  opens the New diagram dialog (type, template and name); programmatic callers use file.newDiagram",
+            false,
+            |s, _| {
+                s.request_ui("dialog.newDiagram", json!({}));
+                Ok(json!({}))
+            }
+        ),
         spec!(
             "file.newBoard",
             "New board",

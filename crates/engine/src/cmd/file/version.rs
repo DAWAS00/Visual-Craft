@@ -31,13 +31,22 @@ const AUTOSAVE: &str = "Autosave";
 
 /// Add a version of `ds`'s document as it is now (`auto`: a checkpoint) and return it. The oldest
 /// autosave makes room when the autosaves or the history are full; versions the user named are
-/// never dropped, so a history full of them takes nothing (None).
+/// never dropped, so a history full of them takes nothing (None). Nor is a snapshot that can't be
+/// read (its typed diagram status unknown): it keeps the file unsaveable until the user deletes
+/// it, and dropping it here would let the next save erase it. When only such autosaves could make
+/// room, no checkpoint is made.
 pub(crate) fn add_version(ds: &mut DocState, name: &str, description: &str, auto: bool) -> Option<Value> {
     let autos = ds.versions.iter().filter(|v| v.auto).count();
-    if ((auto && autos >= MAX_AUTOSAVES) || ds.versions.len() >= figcraft_format::MAX_VERSIONS)
-        && let Some(oldest) = ds.versions.iter().position(|v| v.auto)
-    {
-        ds.versions_mut().remove(oldest);
+    let full = (auto && autos >= MAX_AUTOSAVES) || ds.versions.len() >= figcraft_format::MAX_VERSIONS;
+    if full {
+        let evictable = ds.versions.iter().position(|v| v.auto && v.has_typed_records().is_ok());
+        match evictable {
+            Some(oldest) => {
+                ds.versions_mut().remove(oldest);
+            }
+            None if auto => return None,
+            None => {}
+        }
     }
     if ds.versions.len() >= figcraft_format::MAX_VERSIONS {
         return None;
@@ -142,6 +151,11 @@ pub(super) fn restore_version(s: &mut Session, p: &Value) -> Result<Value> {
     let ds = s.ds_mut()?;
     let i = version_index(CMD, ds, p)?;
     let v = ds.versions.get(i).ok_or_else(|| bad(CMD, "no such version"))?;
+    // A typed diagram's snapshot can't come back yet (the session and the file can't hold it);
+    // nor can one that can't be read to tell.
+    if v.has_typed_records().unwrap_or(true) {
+        return Err(EngineError::Disabled(CMD.into(), "a version with a diagram can't be restored yet in this preview".into()));
+    }
     let (id, mut doc) = (v.id.clone(), read_version(v)?);
     // Restoring never loses work: the document as it is goes into the history first.
     keep_in_history(ds);

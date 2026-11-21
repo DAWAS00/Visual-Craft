@@ -14,9 +14,11 @@ mod automation;
 mod boards;
 mod canvas;
 pub mod catalog;
+mod class_diagram;
 pub mod cmd;
 mod content;
 mod dev;
+mod diagram_params;
 pub mod events;
 mod extensions;
 pub mod fonts;
@@ -26,6 +28,7 @@ pub mod measure;
 pub mod proto_run;
 mod selection;
 mod sharing;
+mod use_case;
 pub use assets::components;
 pub use assets::library;
 pub use assets::library_server;
@@ -56,6 +59,9 @@ pub use canvas::textedit;
 pub use canvas::textpreview;
 pub use canvas::tools;
 pub use canvas::vectoredit;
+pub use class_diagram::check_connect as class_check_connect;
+pub use class_diagram::layout as class_layout;
+pub use class_diagram::warning_text as class_warning_text;
 pub use content::datafill;
 pub use content::synthetic;
 pub use content::synthetic_ds;
@@ -86,6 +92,10 @@ pub use sharing::invite_links;
 pub use sharing::live;
 pub use sharing::online;
 pub use sharing::team;
+/// Whether a Use Case join would be accepted, asked by the editor before it offers one.
+pub use use_case::check_connect as use_case_check_connect;
+/// The size the engine gives a new actor or use case, for placing it centred on a press.
+pub use use_case::new_element_size as use_case_new_element_size;
 
 pub use batch::{BatchScope, BatchStep};
 pub use cmd::{CommandSpec, all_commands, find_command};
@@ -244,6 +254,8 @@ mod brush_tests;
 #[cfg(test)]
 mod canvas_fixes_tests;
 #[cfg(test)]
+mod class_diagram_tests;
+#[cfg(test)]
 mod code_connect_tests;
 #[cfg(test)]
 mod collab_ids_tests;
@@ -299,6 +311,8 @@ mod devinspect_tests;
 mod devmode_behaviour_tests;
 #[cfg(test)]
 mod devmode_tail_tests;
+#[cfg(test)]
+mod diagram_new_tests;
 #[cfg(test)]
 mod doc_list_paths_tests;
 #[cfg(test)]
@@ -622,7 +636,11 @@ mod tiff_tests;
 #[cfg(test)]
 mod transform_behaviour_tests;
 #[cfg(test)]
+mod typed_safety_tests;
+#[cfg(test)]
 mod unknown_params_tests;
+#[cfg(test)]
+mod use_case_tests;
 #[cfg(test)]
 mod variable_props_tests;
 #[cfg(test)]
@@ -680,3 +698,5 @@ mod page_view_tests;
 mod selection_reorder_tests;
 #[cfg(test)]
 mod selection_spacing_tests;
+#[cfg(test)]
+mod typed_structure_tests;

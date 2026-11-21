@@ -167,6 +167,8 @@ impl Session {
                 ToolId::TextOnPath => self.text_on_path_down(ev),
                 ToolId::Pen => self.pen_down(ev),
                 ToolId::Pencil => {
+                    // A stroke that the diagram page would refuse at the end isn't started.
+                    crate::use_case::gate::refuse_page(self, "Pencil")?;
                     // The preview draws in the colour the stroke will have (#1741).
                     self.tool.overlay.pen_color = self.pencil_color_at(ev.p()).ok();
                     self.tool.gesture = Gesture::Pencil { points: vec![ev.p()], pressure: vec![ev.pressure] };

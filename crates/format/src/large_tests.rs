@@ -198,7 +198,7 @@ fn files_with_every_field_spelled_out_still_open() {
 #[test]
 fn the_header_is_read_on_its_own() {
     // A newer file is refused before its document is looked at, whatever the version's size.
-    assert!(matches!(from_json(r#"{"nodes": "not a map", "version": 2}"#), Err(FormatError::Newer(2))));
+    assert!(matches!(from_json(r#"{"nodes": "not a map", "version": 3}"#), Err(FormatError::Newer(3))));
     assert!(matches!(from_json(r#"{"version": 99999999999}"#), Err(FormatError::Newer(u32::MAX))));
     // A version that isn't a number is no version; anything but an object is no document.
     let d = serde_json::to_string(&to_json(&Document::new("x")).unwrap()).unwrap();

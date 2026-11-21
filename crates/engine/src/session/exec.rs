@@ -23,6 +23,26 @@ pub(crate) fn finite_check_candidates(doc: &Document, before: &Document) -> Vec<
     doc.changed_ids(before, usize::MAX).unwrap_or_default()
 }
 
+/// A layer's position and size stay finite (see `Session::check_finite_geometry`).
+fn finite_geometry(id: &str, before: &Document, after: &Document) -> Result<()> {
+    let broken = |n: &Node| !(n.transform.as_coeffs().iter().all(|c| c.is_finite()) && n.width.is_finite() && n.height.is_finite());
+    let untouched = |n: &Node| before.node_arc(n.id).zip(after.node_arc(n.id)).is_some_and(|(a, b)| Arc::ptr_eq(a, b));
+    match finite_check_candidates(after, before).iter().filter_map(|i| after.node(*i)).find(|n| broken(n) && !untouched(n)) {
+        Some(n) => Err(bad(id, format!("\"{}\" would get a position or size beyond the number range", n.name))),
+        None => Ok(()),
+    }
+}
+
+/// Instances, library copies and component cycles (see `Session::check_instance_structure`);
+/// `effective` is the command a "Repeat" runs.
+fn structure(id: &str, effective: &str, before: &Document, after: &Document) -> Result<()> {
+    library::check_read_only(effective, before, after)
+        .and_then(|()| components::check_structure_edit(before, after))
+        .and_then(|()| components::check_override_edit(before, after))
+        .and_then(|()| components::check_component_cycles(before, after))
+        .map_err(|m| EngineError::Disabled(id.to_string(), m))
+}
+
 impl Session {
     /// Append a live event with the active document's identity (nothing without one). Inside a
     /// [`Session::grouped`] call the event is buffered and committed only when the group succeeds.
@@ -72,6 +92,15 @@ impl Session {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         crate::cmd::refuse_unknown_params(id, params)?;
         board::refuse_on_board(self, id)?;
+        // A diagram command redraws its page: not under an ordinary edit in progress, and refused
+        // before that edit or its preview is ended (seen through "Repeat" and nested batches).
+        if self.ds().is_ok_and(crate::use_case::gate::ordinary_edit_open)
+            && crate::use_case::gate::runs_typed(id, params, self.last_command.as_ref().map(|(l, _)| l.as_str()))
+        {
+            return Err(EngineError::Disabled(id.into(), "finish the edit in progress first: a diagram command redraws the page under it".into()));
+        }
+        // Before any transport or merge planner starts.
+        crate::use_case::gate::refuse_sharing(self, id)?;
         // Revert replaces the document's uid: refuse before ending previews or syncing branches.
         if id == "file.revert" && self.live().doc_uid.is_some() {
             return Err(EngineError::Disabled(id.into(), "leave the live session before reverting to the saved file".into()));
@@ -112,7 +141,9 @@ impl Session {
                     self.normalize_edit(spec, &before);
                     Ok(v)
                 })
-            });
+            })
+            // The typed-page check sees the edit as it stays, normalised (groups fitted and so on).
+            .and_then(|v| self.check_typed_pages(id, &before).map(|()| v));
         match &result {
             Ok(_) => {
                 self.after_command(spec, before);
@@ -184,12 +215,28 @@ impl Session {
         if Arc::ptr_eq(&ds.doc, bdoc) {
             return Ok(());
         }
-        let broken = |n: &Node| !(n.transform.as_coeffs().iter().all(|c| c.is_finite()) && n.width.is_finite() && n.height.is_finite());
-        let untouched = |n: &Node| bdoc.node_arc(n.id).zip(ds.doc.node_arc(n.id)).is_some_and(|(a, b)| Arc::ptr_eq(a, b));
-        match finite_check_candidates(&ds.doc, bdoc).iter().filter_map(|i| ds.doc.node(*i)).find(|n| broken(n) && !untouched(n)) {
-            Some(n) => Err(bad(id, format!("\"{}\" would get a position or size beyond the number range", n.name))),
-            None => Ok(()),
+        finite_geometry(id, bdoc, &ds.doc)
+    }
+
+    /// The checks `execute` makes once a command has run, made on a version of the document a
+    /// command built aside (a dry run): a command that has to refuse before a step the rollback
+    /// can't undo (ending a text edit commits it) runs them on its dry run first. Access (read-only
+    /// files, live sessions, version previews) is the command's own check.
+    pub(crate) fn check_dry_run(&self, id: &str, before: &Document, after: &Document) -> Result<()> {
+        structure(id, id, before, after)?;
+        finite_geometry(id, before, after)?;
+        crate::use_case::gate::check_edit(before, after).map_err(|m| EngineError::Disabled(id.to_string(), m))
+    }
+
+    /// A typed diagram page's layers change only with its model, and it takes no ordinary
+    /// layers (see [`crate::use_case::gate::check_edit`]): refuse such an edit (it is rolled back).
+    fn check_typed_pages(&self, id: &str, before: &Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>) -> Result<()> {
+        let Some((bdoc, _, _, uid)) = before else { return Ok(()) };
+        let Some(ds) = self.docs.iter().find(|d| d.uid == *uid) else { return Ok(()) };
+        if Arc::ptr_eq(&ds.doc, bdoc) {
+            return Ok(());
         }
+        crate::use_case::gate::check_edit(bdoc, &ds.doc).map_err(|m| EngineError::Disabled(id.to_string(), m))
     }
 
     /// A live session's document you may only view (or that is on its way to a server) is
@@ -220,11 +267,7 @@ impl Session {
             (Some((last, _)), "edit.repeat") => last.as_str(),
             _ => id,
         };
-        library::check_read_only(effective, bdoc, &ds.doc)
-            .and_then(|()| components::check_structure_edit(bdoc, &ds.doc))
-            .and_then(|()| components::check_override_edit(bdoc, &ds.doc))
-            .and_then(|()| components::check_component_cycles(bdoc, &ds.doc))
-            .map_err(|m| EngineError::Disabled(id.to_string(), m))
+        structure(id, effective, bdoc, &ds.doc)
     }
 
     /// Normalise what a command changed in the document it ran on (text boxes, groups, instances,

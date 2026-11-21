@@ -6,8 +6,8 @@
 //! or shape (inside a section too) and a connector joins the two; let go off the canvas or over the
 //! toolbar, nothing. The bar above the selection stays away while a "+" is dragged, as for any drag.
 
-use egui::{Area, Color32, CornerRadius, Id, LayerId, Order, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2};
-use figcraft_doc::{BoardItem, NodeId};
+use egui::{Area, Color32, CornerRadius, Id, Key, LayerId, Order, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, pos2, vec2};
+use figcraft_doc::{BoardItem, BoardShape, NodeId};
 use figcraft_engine::ToolId;
 use figcraft_engine::board::{STICKY, connected_place, sticky_or_shape_at};
 use serde_json::json;
@@ -92,7 +92,201 @@ fn connector_side(side: &str) -> &'static str {
     }
 }
 
+/// The shape each of the chooser's rows makes (`None`: the source's own), in row order.
+const CHOICES: [Option<&str>; 4] = [None, Some("rectangle"), Some("diamond"), Some("roundedRectangle")];
+
+/// A row's name in the interface. Literal keys, so the catalog check sees each one.
+fn choice_label(row: usize) -> &'static str {
+    match row {
+        0 => tr("Same shape"),
+        1 => tr("Process"),
+        2 => tr("Decision"),
+        _ => tr("Terminator"),
+    }
+}
+
+/// The chooser open where a "+" was let go on empty board (`board.addConnected`'s `shape`): the
+/// file and page it is on (node ids repeat from one file to another), the handle it came from,
+/// where the next one goes on the page, and the row the keyboard is on.
+#[derive(Clone)]
+struct Chooser {
+    uid: u64,
+    page: NodeId,
+    from: NodeId,
+    side: &'static str,
+    at: (f64, f64),
+    highlight: usize,
+}
+
+fn chooser_id() -> Id {
+    Id::unique("board_connect_chooser")
+}
+
+/// Whether `id` is a shape (not a sticky): only a shape's next one has a choice of shape.
+fn is_shape(app: &FigApp, id: NodeId) -> bool {
+    app.session.ds().ok().and_then(|ds| ds.doc.node(id)).is_some_and(|n| matches!(n.board, Some(BoardItem::Shape { .. })))
+}
+
+/// What a key or a click does to the open chooser.
+enum Step {
+    Stay,
+    Close,
+    Choose(usize),
+}
+
+/// The keys the chooser takes while it is open, before the canvas shortcuts (which would nudge
+/// the source with the arrows and select its children with Enter).
+const CHOOSER_KEYS: [Key; 4] = [Key::ArrowDown, Key::ArrowUp, Key::Enter, Key::Escape];
+
+/// Take this frame's presses of the chooser's keys (no modifier held) out of the input, in the
+/// order they came; the canvas shortcuts never see them.
+fn take_keys(ctx: &egui::Context) -> Vec<Key> {
+    ctx.input_mut(|i| {
+        let mut keys = Vec::new();
+        i.events.retain(|e| match e {
+            egui::Event::Key { key, pressed: true, modifiers, .. } if modifiers.is_none() && CHOOSER_KEYS.contains(key) => {
+                keys.push(*key);
+                false
+            }
+            _ => true,
+        });
+        keys
+    })
+}
+
+impl Chooser {
+    /// Arrows move the row, Enter makes the choice, Escape leaves nothing made; `None` for a key
+    /// that isn't the chooser's.
+    fn press(&mut self, key: Key) -> Option<Step> {
+        match key {
+            Key::ArrowDown => {
+                self.highlight = (self.highlight + 1).min(CHOICES.len() - 1);
+                Some(Step::Stay)
+            }
+            Key::ArrowUp => {
+                self.highlight = self.highlight.saturating_sub(1);
+                Some(Step::Stay)
+            }
+            Key::Enter => Some(Step::Choose(self.highlight)),
+            Key::Escape => Some(Step::Close),
+            _ => None,
+        }
+    }
+}
+
+/// Which file and page are in front, to tell the chooser's own from another's.
+fn here(app: &FigApp) -> Option<(u64, NodeId)> {
+    app.session.ds().ok().map(|ds| (ds.uid, ds.page))
+}
+
+/// The chooser that is open, if it is on the file and page in front and its source is still the
+/// one selected with handles; any other chooser is closed here (another tab, another page, the
+/// source gone or deselected).
+fn open_chooser(app: &FigApp, ctx: &egui::Context) -> Option<Chooser> {
+    let c = ctx.data(|d| d.get_temp::<Chooser>(chooser_id()))?;
+    if here(app) != Some((c.uid, c.page)) || target(app).is_none_or(|(id, _, _)| id != c.from) {
+        ctx.data_mut(|d| d.remove::<Chooser>(chooser_id()));
+        return None;
+    }
+    Some(c)
+}
+
+/// Keep, close or act on the chooser: a choice makes that shape at the drop point (one undo step,
+/// typing started).
+fn finish(app: &mut FigApp, ctx: &egui::Context, c: Chooser, step: Step) {
+    match step {
+        Step::Stay => {
+            ctx.data_mut(|d| d.insert_temp(chooser_id(), c));
+        }
+        Step::Close => {
+            ctx.data_mut(|d| d.remove::<Chooser>(chooser_id()));
+        }
+        Step::Choose(i) => {
+            ctx.data_mut(|d| d.remove::<Chooser>(chooser_id()));
+            let mut params = json!({"id": c.from, "side": c.side, "at": [c.at.0, c.at.1], "edit": true});
+            if let Some(shape) = CHOICES.get(i).copied().flatten() {
+                params["shape"] = json!(shape);
+            }
+            app.run("board.addConnected", params);
+        }
+    }
+}
+
+/// A key from the control channel's `ui.key`, which runs canvas bindings itself instead of going
+/// through the window's input: the open chooser takes its keys first there too. True when it did.
+pub(crate) fn key(app: &mut FigApp, ctx: &egui::Context, key: Key) -> bool {
+    let Some(mut c) = open_chooser(app, ctx) else { return false };
+    let Some(step) = c.press(key) else { return false };
+    finish(app, ctx, c, step);
+    true
+}
+
+/// The size the chooser's `row` makes from the shape `from` (`connected_size`, as the engine).
+fn row_size(app: &FigApp, from: NodeId, row: usize) -> Option<(f64, f64)> {
+    let n = app.session.ds().ok()?.doc.node(from)?;
+    let Some(BoardItem::Shape { shape }) = n.board else { return None };
+    let choice = CHOICES.get(row).copied().flatten().and_then(BoardShape::from_id);
+    Some(figcraft_engine::board::connected_size(shape, (n.width, n.height), choice))
+}
+
+/// Draw the chooser and act on it: a row's click or Enter makes that shape where the "+" was let
+/// go, Escape or a press elsewhere makes nothing. The highlighted row's shape shows faintly where
+/// it will land, at the size it will have. A text field with the keyboard keeps its keys.
+fn show_chooser(app: &mut FigApp, ctx: &egui::Context) {
+    let Some(mut c) = open_chooser(app, ctx) else { return };
+    let mut step = Step::Stay;
+    // The first pass already took this frame's keys (egui reruns a discarded pass with them).
+    if ctx.current_pass_index() == 0 && !crate::a11y::field_focused(ctx) {
+        // In the order they came, up to the first Enter or Escape: Down, Down, Enter in one frame
+        // is a Decision, and Escape then Enter makes nothing.
+        for k in take_keys(ctx) {
+            if let Some(s @ (Step::Close | Step::Choose(_))) = c.press(k) {
+                step = s;
+                break;
+            }
+        }
+    }
+    // Pinned to the drop point on the page, so it goes with the board when the view moves; the
+    // menu sits beside the next one's box rather than over it.
+    let at = app.to_screen(c.at.0, c.at.1);
+    let mut beside = at;
+    if let Some(size) = row_size(app, c.from, c.highlight) {
+        let px = app.to_screen(size.0, size.1) - app.to_screen(0.0, 0.0);
+        let ghost = Rect::from_center_size(at, px);
+        let p = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("board_connect_preview")));
+        ghost_box(&p, ghost, crate::theme::canvas_accent(ctx));
+        beside = ghost.right_top() + vec2(8.0, 0.0);
+    }
+    let highlight = c.highlight;
+    let response = Area::new(Id::unique("board_connect_chooser_area")).fixed_pos(beside).order(Order::Foreground).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            let mut clicked = None;
+            for i in 0..CHOICES.len() {
+                if ui.selectable_label(i == highlight, choice_label(i)).clicked() {
+                    clicked = Some(i);
+                }
+            }
+            clicked
+        })
+    });
+    // A key that came in the same frame (Escape, Enter) has the last word over a row's click.
+    if let (Some(i), Step::Stay) = (response.inner.inner, &step) {
+        step = Step::Choose(i);
+    }
+    // Where the press began, not where the chooser is pinned (that is always inside it).
+    let pressed_outside =
+        ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.press_origin()).flatten()).is_some_and(|p| !response.response.rect.contains(p));
+    if pressed_outside && matches!(step, Step::Stay) {
+        step = Step::Close;
+    }
+    finish(app, ctx, c, step);
+}
+
 pub fn show(app: &mut FigApp, ctx: &egui::Context) {
+    if ctx.data(|d| d.get_temp::<Chooser>(chooser_id())).is_some() {
+        show_chooser(app, ctx);
+        return;
+    }
     let drag: Option<Drag> = ctx.data(|d| d.get_temp(drag_id()));
     let Some((id, b, next)) = target(app) else {
         // The selection or the tool changed under a drag: it is over.
@@ -179,7 +373,12 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
             }
             None => {
                 let q = app.to_page(pointer);
-                app.run("board.addConnected", json!({"id": from, "side": side, "at": [q.x, q.y], "edit": true}));
+                if let (true, Some((uid, page))) = (is_shape(app, from), here(app)) {
+                    // A shape's next one can be another shape: offer the choice where it lands.
+                    ctx.data_mut(|d| d.insert_temp(chooser_id(), Chooser { uid, page, from, side, at: (q.x, q.y), highlight: 0 }));
+                } else {
+                    app.run("board.addConnected", json!({"id": from, "side": side, "at": [q.x, q.y], "edit": true}));
+                }
             }
         }
     } else if !ctx.input(|i| i.pointer.any_down()) {

@@ -337,7 +337,7 @@ pub fn export(file: &str, out: &str, t: &Target) -> CliResult<ExitCode> {
 fn refuse_dropping_images(input: &str, out: &str, images_left_out: usize) -> CliResult<()> {
     if images_left_out > 0 && figcraft_engine::file_access::same_file(input, out) {
         return Err(CliError::Failed(format!(
-            "{out} wasn't written: {images_left_out} of its images weren't loaded (together they pass what FigCraft reads from one file), and writing over it would delete them. Write to another path; {input} keeps them."
+            "{out} wasn't written: {images_left_out} of its images or version histories weren't loaded (together they pass what FigCraft reads from one file), and writing over it would delete them. Write to another path; {input} keeps them."
         )));
     }
     Ok(())
@@ -355,7 +355,7 @@ fn refuse_dropping_images_from_script(input: Option<(&str, usize)>, active: &fig
 
 pub fn convert(input: &str, out: &str) -> CliResult<ExitCode> {
     let (loaded, _) = figcraft_engine::cmd::file::load_path(input, None).map_err(|e| CliError::Failed(format!("can't open {input}: {e}")))?;
-    refuse_dropping_images(input, out, loaded.images_past_budget)?;
+    refuse_dropping_images(input, out, loaded.images_past_budget + loaded.history_past_budget)?;
     if ext(input) == "penpot" {
         for note in &loaded.issues {
             eprintln!("note: {note}");

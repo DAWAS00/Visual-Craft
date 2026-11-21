@@ -58,6 +58,11 @@ pub fn show(s: &mut Session, command: &str, params: &Value) -> Result<()> {
                 ds.doc = base;
                 return Err(e);
             }
+            // A preview keeps typed diagram pages in step with their models, as the command does.
+            if let Err(why) = crate::use_case::gate::check_edit(&base, &ds.doc) {
+                ds.doc = base;
+                return Err(EngineError::Disabled(cmd.into(), why));
+            }
             ds.text_preview = Some(base);
             ds.revision += 1;
             Ok(())
@@ -85,6 +90,7 @@ pub(crate) fn show_change(s: &mut Session, cmd: &str, change: impl FnOnce(&mut f
         normalize(&mut doc, &base);
         Ok(())
     })?;
+    crate::use_case::gate::check_edit(&base, &doc).map_err(|why| EngineError::Disabled(cmd.into(), why))?;
     ds.doc = Arc::new(doc);
     ds.text_preview = Some(base);
     ds.revision += 1;

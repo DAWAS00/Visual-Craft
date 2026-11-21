@@ -33,6 +33,7 @@ pub mod branch_ui;
 pub mod credits;
 pub mod import_report;
 pub mod missing_fonts;
+pub mod new_diagram;
 pub mod plugins_ui;
 pub mod sampled_color;
 pub mod updates_ui;
@@ -170,8 +171,10 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
     if egui::Popup::is_any_open(ctx) {
         return;
     }
+    new_diagram::enter(app, ctx);
     let u = &mut app.ui;
-    let open = u.color_profile.is_some()
+    let open = u.new_diagram.is_some()
+        || u.color_profile.is_some()
         || u.menu_input.is_some()
         || u.find.is_some()
         || u.batch_rename.is_some()
@@ -186,7 +189,8 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
     if !open || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         return;
     }
-    if u.menu_input.take().is_some()
+    if u.new_diagram.take().is_some()
+        || u.menu_input.take().is_some()
         || u.color_profile.take().is_some()
         || u.find.take().is_some()
         || u.batch_rename.take().is_some()
@@ -406,6 +410,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
         export_dialog(app, ctx);
     }
     color_profile_dialog(app, ctx);
+    new_diagram::show(app, ctx);
     crate::plugins_ui::show(app, ctx);
     crate::live::join_dialog(app, ctx);
     crate::live::publish_dialog(app, ctx);
