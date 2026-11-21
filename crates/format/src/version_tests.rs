@@ -102,7 +102,9 @@ fn damaged_versions_never_fail_the_load() {
     let l = load_bytes_with_versions(&bytes).unwrap();
     let names: Vec<&str> = l.versions.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, ["Fine", "Broken"]);
-    assert_eq!(l.issues.len(), 4, "{:?}", l.issues);
+    // The damaged snapshot is kept, and reported: its diagram status is unknown, so the file
+    // can't be saved until it's deleted (typed diagram preview).
+    assert_eq!(l.issues.len(), 5, "{:?}", l.issues);
     let ok = &l.versions[0];
     assert_eq!((ok.description.as_str(), ok.time), ("", 0));
     assert!(ok.images().is_empty());

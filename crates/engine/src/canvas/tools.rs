@@ -555,6 +555,8 @@ fn pen_handles(points: &[(Point, Vec2, Vec2)]) -> Vec<[f64; 4]> {
 /// The pen tool's in-progress path (page coordinates).
 #[derive(Clone, Debug, Default)]
 pub struct PenPath {
+    /// The tab (its document's `uid`) and page the path was started on: it continues only there.
+    pub place: Option<(u64, NodeId)>,
     pub id: Option<NodeId>,
     pub parent: Option<NodeId>,
     /// Anchors with (in, out) handle offsets.

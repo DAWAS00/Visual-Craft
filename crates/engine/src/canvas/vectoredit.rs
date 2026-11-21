@@ -525,6 +525,14 @@ pub fn enter_targets(doc: &Document, sel: &[NodeId]) -> Option<Vec<NodeId>> {
 /// Start editing `ids` as vectors at once (shapes are converted, in one undo step); the first is
 /// the active layer. Layers that can't be edited as vectors are left out (an error when none can).
 pub fn begin_many(s: &mut Session, ids: &[NodeId]) -> Result<()> {
+    // A diagram's layers come from its model: none of them is converted or edited as a vector
+    // (Enter, a double-click, the pen continuing a path: every entry comes here).
+    {
+        let doc = s.doc()?;
+        for id in ids.iter().take(MAX_EDITED) {
+            crate::use_case::gate::refuse_at(doc, *id).map_err(|why| crate::EngineError::Disabled("vector.edit.begin".into(), why))?;
+        }
+    }
     let before = s.ds()?.doc.clone();
     let mut edited = Vec::new();
     let mut first_err = None;

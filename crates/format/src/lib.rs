@@ -29,6 +29,7 @@ pub use density::{pixel_density, placed_size};
 pub use library::{is_valid_library_id, read_library, read_library_within};
 
 mod density;
+mod typed_probe;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -151,11 +152,15 @@ pub struct Loaded {
     pub versions: Vec<Version>,
     pub branches: Vec<Branch>,
     pub images_past_budget: usize,
+    /// Version histories (the file's own or a branch's) left in the file unread because the
+    /// file's contents together pass what is read from one file: saving over it is refused, as for
+    /// [`Self::images_past_budget`], so they are never erased.
+    pub history_past_budget: usize,
 }
 
 impl From<Document> for Loaded {
     fn from(doc: Document) -> Self {
-        Self { doc, issues: Vec::new(), versions: Vec::new(), branches: Vec::new(), images_past_budget: 0 }
+        Self { doc, issues: Vec::new(), versions: Vec::new(), branches: Vec::new(), images_past_budget: 0, history_past_budget: 0 }
     }
 }
 
@@ -371,20 +376,95 @@ impl<S: serde::ser::SerializeStructVariant> serde::ser::SerializeStructVariant f
     }
 }
 
-/// Serialize the document (without images) to the JSON value stored in `document.json`.
-/// NaN and infinite numbers are written as `0`.
-pub fn to_json(doc: &Document) -> Result<Value, FormatError> {
-    {
-        let mut bytes = Vec::new();
-        craft_figcraft_format::write_document_json(&FiniteValue(doc), &native_image_index(doc), &mut bytes).map_err(io_err)?;
-        serde_json::from_slice(&bytes).map_err(io_err)
+/// The header version of a document holding typed diagram records (a model behind a page). A
+/// reader that only knows [`VERSION`] refuses it, so it is never opened without its models.
+pub const TYPED_VERSION: u32 = craft_figcraft_format::TYPED_VERSION;
+
+/// Why text holding typed diagram records isn't opened: its header doesn't say [`TYPED_VERSION`].
+/// No FigCraft wrote such text (typed diagrams were never saved in a plain file), so it came from
+/// elsewhere and its models aren't migrated or trusted. The whole file is refused, whether the
+/// records are in the document, a version, or a branch.
+pub const TYPED_LOAD_REFUSAL: &str = "This file has diagrams in a format version that can't hold them, so it isn't opened.";
+
+fn typed_load_refusal() -> FormatError {
+    FormatError::Io(TYPED_LOAD_REFUSAL.into())
+}
+
+fn is_typed_load_refusal(e: &FormatError) -> bool {
+    matches!(e, FormatError::Io(m) if m == TYPED_LOAD_REFUSAL)
+}
+
+/// The header version a document's own snapshot is written with: [`TYPED_VERSION`] when it holds a
+/// typed diagram record, else [`VERSION`].
+fn doc_version(doc: &Document) -> u32 {
+    if doc.has_typed_records() { TYPED_VERSION } else { VERSION }
+}
+
+/// Whether a stored snapshot's `document.json` text holds a typed diagram record, read in one
+/// streaming pass that keeps nothing ([`typed_probe`]). Text the probe can't read is an error,
+/// never "no": a snapshot whose typed status is unknown isn't copied or written.
+fn stored_has_typed_records(json: &[u8]) -> Result<bool, FormatError> {
+    typed_probe::typed(json).map_err(|e| FormatError::Corrupt(format!("a stored version can't be read: {e}")))
+}
+
+impl Version {
+    /// Whether the snapshot holds a typed diagram record (a stored snapshot is probed without
+    /// being parsed whole). `Err`: a stored snapshot that can't be read, so nobody can tell.
+    pub fn has_typed_records(&self) -> Result<bool, FormatError> {
+        match &self.snapshot {
+            Snapshot::Doc(d) => Ok(d.has_typed_records()),
+            Snapshot::Stored { json, .. } => stored_has_typed_records(json),
+        }
     }
 }
 
+impl Branch {
+    /// Whether the branch's base, head or one of its versions holds a typed diagram record
+    /// (`Err`: a version can't be read to tell).
+    pub fn has_typed_records(&self) -> Result<bool, FormatError> {
+        if self.base.has_typed_records() || self.head.has_typed_records() {
+            return Ok(true);
+        }
+        for v in &self.versions {
+            if v.has_typed_records()? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// The header version of a whole file's `document.json`: [`TYPED_VERSION`] when the document, a
+/// version, a branch's base or head, or a branch version holds a typed diagram record, so a reader
+/// that only knows [`VERSION`] refuses the whole file instead of opening it with its diagrams
+/// missing from the history; else [`VERSION`]. A stored version that can't be read to tell is
+/// an error: every writer of the format calls this first, so nothing whose typed status is unknown
+/// is ever written.
+pub fn file_version(doc: &Document, versions: &[Version], branches: &[Branch]) -> Result<u32, FormatError> {
+    let mut typed = doc.has_typed_records();
+    for v in versions {
+        typed |= v.has_typed_records()?;
+    }
+    for b in branches {
+        typed |= b.has_typed_records()?;
+    }
+    Ok(if typed { TYPED_VERSION } else { VERSION })
+}
+
+/// Serialize the document (without images) to the JSON value stored in `document.json`.
+/// NaN and infinite numbers are written as `0`. A document with a typed diagram is written as
+/// [`TYPED_VERSION`].
+pub fn to_json(doc: &Document) -> Result<Value, FormatError> {
+    let mut bytes = Vec::new();
+    write_json(doc, &mut bytes)?;
+    serde_json::from_slice(&bytes).map_err(io_err)
+}
+
 /// Write the document (without images) as `document.json` content to `w`.
-/// NaN and infinite numbers are written as `0`.
+/// NaN and infinite numbers are written as `0`. A document with a typed diagram is written as
+/// [`TYPED_VERSION`].
 pub fn write_json(doc: &Document, w: impl Write) -> Result<(), FormatError> {
-    craft_figcraft_format::write_document_json(&FiniteValue(doc), &native_image_index(doc), w).map_err(io_err)
+    craft_figcraft_format::write_document_json_version(&FiniteValue(doc), &native_image_index(doc), doc_version(doc), w).map_err(io_err)
 }
 
 /// Parse `document.json` content.
@@ -394,13 +474,25 @@ pub fn from_json(text: &str) -> Result<(Document, Vec<String>), FormatError> {
 
 /// Parse `document.json` content; also returns its [`ImageIndex`]. The header is checked first
 /// (a newer file is refused before its document is read), then the document is deserialized
-/// straight from the text.
+/// straight from the text. Text with typed diagram records (the probe caps what they may take) is
+/// read only when its header says [`TYPED_VERSION`], and refused before anything decodes them
+/// otherwise ([`TYPED_LOAD_REFUSAL`]); their models are then checked, and a problem refuses it.
 fn parse_json(text: &str) -> Result<(Document, Vec<String>, ImageIndex), FormatError> {
+    if typed_probe::typed(text.as_bytes()).map_err(FormatError::Corrupt)? {
+        let header = craft_figcraft_format::read_header(text).map_err(|e| FormatError::Corrupt(e.to_string()))?;
+        craft_figcraft_format::check_version(&header).map_err(|e| FormatError::Newer(e.0))?;
+        if header.version != Some(u64::from(TYPED_VERSION)) {
+            return Err(typed_load_refusal());
+        }
+    }
     let (mut doc, header) = craft_figcraft_format::read_document_json::<Document>(text).map_err(|e| match e {
         craft_figcraft_format::ReadDocumentError::Json(error) => FormatError::Corrupt(error.to_string()),
         craft_figcraft_format::ReadDocumentError::NewerVersion(error) => FormatError::Newer(error.0),
     })?;
     let images = header.images.map(|hashes| hashes.into_iter().collect());
+    if let Some(problem) = doc.use_case_problem().or_else(|| doc.class_diagram_problem()) {
+        return Err(FormatError::Corrupt(problem));
+    }
     let issues = doc.validate();
     if !issues.is_empty() {
         doc.repair();
@@ -439,9 +531,10 @@ pub fn zip_files<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Re
     .map_err(io_err)
 }
 
-/// Add `doc` as a `document.json`-style member, serialized straight into the compressor.
-fn put_json(z: &mut craft_figcraft_format::ArchiveWriter, name: &str, doc: &Document) -> Result<(), FormatError> {
-    z.add_document_json(name, &FiniteValue(doc), &native_image_index(doc)).map_err(io_err)
+/// Add `doc` as a `document.json`-style member with header `version`, serialized straight into
+/// the compressor.
+fn put_json(z: &mut craft_figcraft_format::ArchiveWriter, name: &str, doc: &Document, version: u32) -> Result<(), FormatError> {
+    z.add_document_json_version(name, &FiniteValue(doc), &native_image_index(doc), version).map_err(io_err)
 }
 
 /// Write a `.figcraft` archive to bytes.
@@ -461,9 +554,10 @@ pub fn save_bytes_with_history(
     versions: &[Version],
     branches: &[Branch],
 ) -> Result<Vec<u8>, FormatError> {
+    let version = file_version(doc, versions, branches)?;
     let mut z = craft_figcraft_format::ArchiveWriter::new();
     let stored = craft_figcraft_format::Compression::Stored;
-    put_json(&mut z, "document.json", doc)?;
+    put_json(&mut z, "document.json", doc, version)?;
     // Every image once, whether the document, a version or a branch uses it.
     let mut written = BTreeSet::new();
     let branch_images = branches.iter().flat_map(|b| [&b.base.images, &b.head.images].into_iter().chain(b.versions.iter().map(Version::images)));
@@ -483,8 +577,8 @@ pub fn save_bytes_with_history(
             if !is_valid_version_id(&b.id) || !ids.insert(b.id.as_str()) {
                 return Err(FormatError::Io(format!("invalid or duplicate branch id `{}`", b.id)));
             }
-            put_json(&mut z, &format!("branches/{}/base.json", b.id), &b.base)?;
-            put_json(&mut z, &format!("branches/{}/head.json", b.id), &b.head)?;
+            put_json(&mut z, &format!("branches/{}/base.json", b.id), &b.base, doc_version(&b.base))?;
+            put_json(&mut z, &format!("branches/{}/head.json", b.id), &b.head, doc_version(&b.head))?;
             put_versions(&mut z, &format!("branches/{}/versions", b.id), &b.versions)?;
             let images = |d: &Document| d.images.keys().cloned().collect::<Vec<String>>();
             index.push(NativeBranchEntry {
@@ -528,7 +622,9 @@ fn put_versions(z: &mut craft_figcraft_format::ArchiveWriter, dir: &str, version
         }
         let name = format!("{dir}/{}.json", v.id);
         match &v.snapshot {
-            Snapshot::Doc(d) => put_json(z, &name, d)?,
+            Snapshot::Doc(d) => put_json(z, &name, d, doc_version(d))?,
+            // As it was read: a typed one was read only with the typed header ([`parse_json`]),
+            // and one whose typed status is unknown never gets here ([`file_version`]).
             Snapshot::Stored { json, .. } => put(z, &name, craft_figcraft_format::Compression::Level(3), json)?,
         }
         index.push(NativeVersionEntry {
@@ -609,8 +705,10 @@ fn load_archive(z: &mut impl craft_figcraft_format::NativeArchive, budget: Image
         Err(e) => issues.push(format!("the published library was skipped: {e}")),
     }
     let mut budget = MAX_VERSION_BYTES;
-    let versions = read_versions(z, "versions", &images, &mut issues, &mut budget, &mut unpacked);
-    let branches = read_branches(z, &images, &mut issues, &mut unpacked);
+    let mut history_past_budget = 0;
+    let mut left = Left { issues: &mut issues, histories: &mut history_past_budget };
+    let versions = read_versions(z, "versions", &images, &mut left, &mut budget, &mut unpacked)?;
+    let branches = read_branches(z, &images, &mut left, &mut unpacked)?;
     // Images only the version history or branches use stay with them.
     let branch_images =
         branches.iter().flat_map(|b| b.base.images.keys().chain(b.head.images.keys()).chain(b.versions.iter().flat_map(|v| v.images().keys())));
@@ -621,7 +719,7 @@ fn load_archive(z: &mut impl craft_figcraft_format::NativeArchive, budget: Image
         .filter(|h| own_images.as_ref().is_some_and(|o| !o.contains(*h)))
         .collect();
     doc.images = images.into_iter().filter(|(h, _)| !history_only.contains(h)).collect();
-    Ok(Loaded { doc, issues, versions, branches, images_past_budget })
+    Ok(Loaded { doc, issues, versions, branches, images_past_budget, history_past_budget })
 }
 
 /// The archive's `images/` members by hash, within `budget`, and the ones that couldn't be read
@@ -724,30 +822,54 @@ fn report_lost_images(
 }
 
 /// The version history kept under `dir` in an archive (none when it has no index), reading at
-/// most `budget` bytes of snapshots. Damaged entries are skipped and reported in `issues`; nothing
-/// here fails the load.
+/// most `budget` bytes of snapshots. Damaged entries are skipped and reported in `issues`; a
+/// snapshot with typed diagram records is checked whole here ([`parse_json`]), and one without the
+/// typed header ([`TYPED_LOAD_REFUSAL`]) or with a bad model fails the load. Snapshots stay
+/// unparsed, so each one is probed here. One the probe can't read is kept as it is, its typed
+/// status unknown: nothing is dropped, and the file can't be saved until it is deleted (every
+/// writer refuses an unknown snapshot, [`file_version`]).
 fn read_versions(
     z: &mut impl craft_figcraft_format::NativeArchive,
     dir: &str,
     images: &BTreeMap<String, ImageData>,
-    issues: &mut Vec<String>,
+    left: &mut Left<'_>,
     budget: &mut u64,
     unpacked: &mut Unpacked,
-) -> Vec<Version> {
+) -> Result<Vec<Version>, FormatError> {
     let index_name = format!("{dir}/index.json");
     if !z.contains(&index_name) {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    let snapshots = has_members_under(z, &format!("{dir}/"), &index_name);
+    // Past what is read from one file (its images took the room, say): the history stays in the
+    // file unread, and saving over the file is refused so a save never erases it.
+    if snapshots && unpacked.exceeds_remaining(z, &index_name) {
+        left.history(format!("the version history in `{dir}` wasn't loaded: {}", unpacked.exhausted_message()));
+        return Ok(Vec::new());
     }
     let index = match unpacked
         .read(z, &index_name, MAX_VERSION_INDEX)
         .and_then(|b| craft_figcraft_format::read_version_index(&b).map_err(|e| FormatError::Corrupt(e.to_string())))
     {
         Ok(v) => v,
+        // An index that can't be read beside snapshots it lists: they can't be told apart or
+        // probed, and dropping them would let a save erase them (diagrams among them, maybe).
+        Err(e) if snapshots => {
+            return Err(FormatError::Corrupt(format!("the version history can't be read: {e}")));
+        }
         Err(e) => {
-            issues.push(format!("the version history was skipped: {e}"));
-            return Vec::new();
+            left.issues.push(format!("the version history was skipped: {e}"));
+            return Ok(Vec::new());
         }
     };
+    // A snapshot the index doesn't list (an index that reads as empty, say) can't be loaded, and
+    // a save would erase it: the history stays in the file unread, and saving over it is refused.
+    let listed: std::collections::HashSet<String> = index.versions.iter().map(|e| format!("{dir}/{}.json", e.id)).collect();
+    if z.names().iter().any(|n| n.starts_with(&format!("{dir}/")) && *n != index_name && !listed.contains(n.as_str())) {
+        left.history(format!("the version history in `{dir}` has snapshots its index doesn't list"));
+        return Ok(Vec::new());
+    }
+    let issues = &mut *left.issues;
     let mut out: Vec<Version> = Vec::new();
     for e in index.versions {
         if out.len() >= MAX_VERSIONS {
@@ -759,14 +881,37 @@ fn read_versions(
             issues.push("a version with an invalid id was skipped".into());
             continue;
         }
-        let json = match unpacked.read(z, &format!("{dir}/{id}.json"), (*budget).min(MAX_MEMBER)) {
-            Ok(j) => j,
-            Err(err) => {
+        let member = format!("{dir}/{id}.json");
+        let (json, reported) = match unpacked.read(z, &member, (*budget).min(MAX_MEMBER)) {
+            Ok(j) => (j, false),
+            // Not in the file: nothing to keep.
+            Err(err) if !z.contains(&member) => {
                 issues.push(format!("version `{id}` was skipped: {err}"));
                 continue;
             }
+            // In the file but unreadable (damaged, or past a size cap): kept as a snapshot that
+            // can't be read, so its diagram status is unknown and the file can't be saved until
+            // it's deleted. Dropping it would let a save erase it.
+            Err(err) => {
+                issues.push(format!("version `{id}` can't be read, so the file can't be saved until it's deleted: {err}"));
+                (Vec::new(), true)
+            }
         };
         *budget = budget.saturating_sub(json.len() as u64);
+        match typed_probe::typed(&json) {
+            // Checked now, though kept unparsed: its header and models, so a file whose history
+            // holds a diagram that couldn't come back is refused when it opens, not later.
+            Ok(true) => {
+                let text = std::str::from_utf8(&json).map_err(|e| FormatError::Corrupt(format!("version `{id}` can't be read: {e}")))?;
+                parse_json(text).map_err(|e| match e {
+                    FormatError::Corrupt(m) => FormatError::Corrupt(format!("version `{id}` can't be read: {m}")),
+                    other => other,
+                })?;
+            }
+            Ok(false) => {}
+            Err(_) if reported => {}
+            Err(err) => issues.push(format!("version `{id}` can't be read, so the file can't be saved until it's deleted: {err}")),
+        }
         let images = e.images.iter().filter_map(|h| images.get(h).map(|i| (h.clone(), i.clone()))).collect();
         out.push(Version {
             id: id.to_string(),
@@ -777,53 +922,140 @@ fn read_versions(
             snapshot: Snapshot::Stored { json: Arc::new(json), images },
         });
     }
-    out
+    Ok(out)
+}
+
+/// Where the history readers report: the load's issues, and how many histories stayed in the
+/// file unread ([`Loaded::history_past_budget`]).
+struct Left<'a> {
+    issues: &'a mut Vec<String>,
+    histories: &'a mut usize,
+}
+
+impl Left<'_> {
+    fn history(&mut self, note: String) {
+        self.issues.push(format!("{note}; it stays in the file, which can't be saved over (save under another name)"));
+        *self.histories += 1;
+    }
+}
+
+/// The archive has a member under `prefix` other than `index` (the snapshots an index lists).
+fn has_members_under(z: &impl craft_figcraft_format::NativeArchive, prefix: &str, index: &str) -> bool {
+    z.names().iter().any(|n| n.starts_with(prefix) && n != index)
 }
 
 /// The branches of an archive (none when it has no index), parsed. Damaged entries are skipped and
-/// reported in `issues`; nothing here fails the load.
+/// reported in `issues`. A part with typed diagram records (base, head or a version, of a damaged
+/// branch too) that can't be read whole fails the load (without the typed header,
+/// [`TYPED_LOAD_REFUSAL`]), and so does a damaged branch with a part whose typed status can't be
+/// told: a branch can't be kept unparsed, and dropping it could
+/// drop diagrams a later save would then erase.
 fn read_branches(
     z: &mut impl craft_figcraft_format::NativeArchive,
     images: &BTreeMap<String, ImageData>,
-    issues: &mut Vec<String>,
+    left: &mut Left<'_>,
     unpacked: &mut Unpacked,
-) -> Vec<Branch> {
+) -> Result<Vec<Branch>, FormatError> {
     if !z.contains(BRANCH_INDEX) {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    let parts = has_members_under(z, "branches/", BRANCH_INDEX);
+    if parts && unpacked.exceeds_remaining(z, BRANCH_INDEX) {
+        left.history(format!("the branches weren't loaded: {}", unpacked.exhausted_message()));
+        return Ok(Vec::new());
     }
     let index = match unpacked
         .read(z, BRANCH_INDEX, MAX_VERSION_INDEX)
         .and_then(|b| craft_figcraft_format::read_branch_index(&b).map_err(|e| FormatError::Corrupt(e.to_string())))
     {
         Ok(v) => v,
+        // Likewise for branches: their parts are there, and can't be told apart without it.
+        Err(e) if parts => {
+            return Err(FormatError::Corrupt(format!("the branches can't be read: {e}")));
+        }
         Err(e) => {
-            issues.push(format!("the branches were skipped: {e}"));
-            return Vec::new();
+            left.issues.push(format!("the branches were skipped: {e}"));
+            return Ok(Vec::new());
         }
     };
+    // Parts of a branch the index doesn't list (an index that reads as empty, say): likewise kept
+    // in the file unread, and saving over it refused.
+    let listed: Vec<String> = index.branches.iter().map(|e| format!("branches/{}/", e.id)).collect();
+    if z.names().iter().any(|n| n.starts_with("branches/") && n.as_str() != BRANCH_INDEX && !listed.iter().any(|p| n.starts_with(p.as_str()))) {
+        left.history("the branches have parts their index doesn't list".to_string());
+        return Ok(Vec::new());
+    }
     let mut out: Vec<Branch> = Vec::new();
     let mut budget = MAX_VERSION_BYTES;
     for e in index.branches {
         if out.len() >= MAX_BRANCHES {
-            issues.push(format!("only the first {MAX_BRANCHES} branches were kept"));
+            left.issues.push(format!("only the first {MAX_BRANCHES} branches were kept"));
             break;
         }
         let id = e.id.as_str();
         if !is_valid_version_id(id) || out.iter().any(|b| b.id == id) {
-            issues.push("a branch with an invalid id was skipped".into());
+            left.issues.push("a branch with an invalid id was skipped".into());
             continue;
         }
-        let mut snapshot = |part: &str, hashes: &[String]| -> Result<Arc<Document>, FormatError> {
-            let json = unpacked.read(z, &format!("branches/{id}/{part}.json"), budget.min(MAX_MEMBER))?;
+        // A part past what is read from one file (images took the room, say): the branch stays in
+        // the file unread, and saving over the file is refused.
+        let mut over = false;
+        // A part: its document, or why not (a typed record and an unreadable one fail the load).
+        let mut snapshot = |part: &str, hashes: &[String]| -> Result<Result<Arc<Document>, FormatError>, FormatError> {
+            let member = format!("branches/{id}/{part}.json");
+            if unpacked.exceeds_remaining(z, &member) {
+                over = true;
+                return Ok(Err(FormatError::Corrupt(unpacked.exhausted_message())));
+            }
+            let json = match unpacked.read(z, &member, budget.min(MAX_MEMBER)) {
+                Ok(j) => j,
+                // Not in the file: the branch is skipped, as before.
+                Err(e) if !z.contains(&member) => return Ok(Err(e)),
+                // In the file but unreadable (damaged, or past a size cap): a branch can't be kept
+                // unparsed, so the load fails rather than drop it.
+                Err(e) => return Err(FormatError::Corrupt(format!("branch `{id}` can't be read to tell whether it has diagrams: {e}"))),
+            };
             budget = budget.saturating_sub(json.len() as u64);
-            let (mut doc, _) = from_json(std::str::from_utf8(&json).map_err(|e| FormatError::Corrupt(e.to_string()))?)?;
-            doc.images = hashes.iter().filter_map(|h| images.get(h).map(|i| (h.clone(), i.clone()))).collect();
-            Ok(Arc::new(doc))
+            let typed = match typed_probe::typed(&json) {
+                Ok(t) => t,
+                Err(e) => return Err(FormatError::Corrupt(format!("branch `{id}` can't be read to tell whether it has diagrams: {e}"))),
+            };
+            let text = match std::str::from_utf8(&json) {
+                Ok(t) => t,
+                Err(e) if typed => return Err(FormatError::Corrupt(format!("branch `{id}` can't be read: {e}"))),
+                Err(e) => return Ok(Err(FormatError::Corrupt(e.to_string()))),
+            };
+            match from_json(text) {
+                Ok((mut doc, _)) => {
+                    doc.images = hashes.iter().filter_map(|h| images.get(h).map(|i| (h.clone(), i.clone()))).collect();
+                    Ok(Ok(Arc::new(doc)))
+                }
+                // A part with diagrams that can't be read fails the load: skipping the branch
+                // would drop them, and a later save would erase them.
+                Err(e) if typed => Err(e),
+                Err(e) => Ok(Err(e)),
+            }
         };
-        let (base, head) = match (snapshot("base", &e.base_images), snapshot("head", &e.head_images)) {
+        let (base, head) = (snapshot("base", &e.base_images), snapshot("head", &e.head_images));
+        // A typed part fails the load first, even beside one that can't be read.
+        if [&base, &head].into_iter().any(|r| r.as_ref().is_err_and(is_typed_load_refusal)) {
+            return Err(typed_load_refusal());
+        }
+        let (base, head) = (base?, head?);
+        let versions = read_versions(z, &format!("branches/{id}/versions"), images, left, &mut budget, unpacked)?;
+        let (base, head) = match (base, head) {
             (Ok(b), Ok(h)) => (b, h),
+            (Err(err), _) | (_, Err(err)) if over => {
+                left.history(format!("branch `{id}` wasn't loaded: {err}"));
+                continue;
+            }
             (Err(err), _) | (_, Err(err)) => {
-                issues.push(format!("branch `{id}` was skipped: {err}"));
+                // The damaged branch goes; its versions were checked first, and one whose typed
+                // status is unknown would go with it.
+                if versions.iter().any(|v| v.has_typed_records().is_err()) {
+                    return Err(FormatError::Corrupt(format!("branch `{id}` is damaged and has a version that can't be read: {err}")));
+                }
+                left.issues.push(format!("branch `{id}` was skipped: {err}"));
                 continue;
             }
         };
@@ -837,12 +1069,12 @@ fn read_branches(
                 NativeBranchState::Merged => BranchState::Merged,
                 NativeBranchState::Archived => BranchState::Archived,
             },
-            versions: read_versions(z, &format!("branches/{id}/versions"), images, issues, &mut budget, unpacked),
+            versions,
             base,
             head,
         });
     }
-    out
+    Ok(out)
 }
 
 /// Save atomically: write a staging file next to `path`, then rename over it.
@@ -944,6 +1176,8 @@ mod staging_tests;
 mod streaming_tests;
 #[cfg(test)]
 mod thumbnail_tests;
+#[cfg(test)]
+mod typed_preview_tests;
 #[cfg(test)]
 mod unpacked_total_tests;
 #[cfg(test)]

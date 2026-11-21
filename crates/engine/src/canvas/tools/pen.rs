@@ -72,6 +72,7 @@ impl Session {
     }
 
     pub(super) fn pen_down(&mut self, ev: &PointerEvent) -> Result<()> {
+        self.pen_check_place()?;
         self.tool.overlay.guides.clear();
         // The segment being placed shows as itself while the press lasts.
         self.tool.overlay.rubber = None;
@@ -87,7 +88,13 @@ impl Session {
         {
             return self.edit_vector_with(id, VTool::Pen, Some(v));
         }
-        let pen = self.tool.pen.get_or_insert_with(PenPath::default);
+        // A new path on a diagram page is refused before its first anchor is stored (the path is
+        // inserted from its second anchor on, outside any command).
+        if self.tool.pen.is_none() {
+            crate::use_case::gate::refuse_page(self, "Pen")?;
+        }
+        let here = (self.ds()?.uid, page);
+        let pen = self.tool.pen.get_or_insert_with(|| PenPath { place: Some(here), ..PenPath::default() });
         // Clicking the first anchor closes the path.
         if pen.points.len() > 2
             && let Some((first, _, _)) = pen.points.first()
@@ -126,6 +133,7 @@ impl Session {
     /// Undo while the pen draws (#1745): its last anchor goes (before two anchors, with the layer
     /// they made; with the only one, the whole path). Returns whether there was a path.
     pub(crate) fn pen_undo(&mut self) -> Result<bool> {
+        self.pen_check_place()?;
         let Some(pen) = self.tool.pen.as_mut() else { return Ok(false) };
         let Some(last) = pen.points.pop() else {
             self.tool.pen = None;
@@ -151,6 +159,7 @@ impl Session {
     /// Redo while the pen draws: the last anchor undo took back returns. Returns whether there was
     /// one.
     pub(crate) fn pen_redo(&mut self) -> Result<bool> {
+        self.pen_check_place()?;
         let Some(pen) = self.tool.pen.as_mut() else { return Ok(false) };
         let Some(point) = pen.undone.pop() else { return Ok(false) };
         pen.points.push(point);
@@ -159,8 +168,37 @@ impl Session {
         Ok(true)
     }
 
+    /// The pen's path belongs to the tab and page it started on. Anywhere else (another tab came to
+    /// the front, another page was opened) it ends first, in its own tab, as a finished path:
+    /// its layer id means nothing here and must never be written to.
+    pub(crate) fn pen_check_place(&mut self) -> Result<()> {
+        let Some(pen) = &self.tool.pen else { return Ok(()) };
+        let here = self.ds().ok().map(|d| (d.uid, d.page));
+        if pen.place == here {
+            return Ok(());
+        }
+        let (place, had_layer) = (pen.place, pen.id.is_some());
+        self.tool.pen = None;
+        self.tool.overlay.pen.clear();
+        self.tool.overlay.pen_handles.clear();
+        self.tool.overlay.rubber = None;
+        self.tool.overlay.rubber_handle = None;
+        self.tool.gesture = Gesture::None;
+        if let (true, Some((uid, _))) = (had_layer, place)
+            && let Some(i) = self.docs.iter().position(|d| d.uid == uid)
+        {
+            let active = self.active;
+            self.active = i;
+            let done = self.commit_interaction();
+            self.active = active;
+            done?;
+        }
+        Ok(())
+    }
+
     /// Rebuild the pen's vector node from its anchors.
     pub(super) fn pen_update(&mut self) -> Result<()> {
+        self.pen_check_place()?;
         let Some(pen) = self.tool.pen.clone() else { return Ok(()) };
         self.tool.overlay.pen = pen.points.iter().map(|(p, _, _)| [p.x, p.y]).collect();
         self.tool.overlay.pen_handles = pen_handles(&pen.points);
@@ -172,6 +210,15 @@ impl Session {
         }
         let page = self.page()?;
         let parent = pen.parent.unwrap_or(page);
+        // The layers this changes outside a command: never a diagram's (checked every time).
+        {
+            let doc = self.doc()?;
+            let refuse = |id: NodeId| crate::use_case::gate::refuse_at(doc, id).map_err(|why| crate::EngineError::Disabled("Pen".into(), why));
+            refuse(parent)?;
+            if let Some(id) = pen.id.filter(|id| doc.contains(*id)) {
+                refuse(id)?;
+            }
+        }
         if pen.id.is_none() {
             self.begin_interaction("Pen")?;
         }
@@ -297,6 +344,7 @@ impl Session {
 
     /// Finish the pen path (and keep the pen tool: double-click, Delete, a tool switch).
     pub fn pen_finish(&mut self) -> Result<()> {
+        self.pen_check_place()?;
         let pen = self.tool.pen.take();
         self.tool.overlay.pen.clear();
         self.tool.overlay.pen_handles.clear();

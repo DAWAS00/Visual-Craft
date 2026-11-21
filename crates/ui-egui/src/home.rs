@@ -350,15 +350,20 @@ fn action_card(ui: &mut Ui, t: &Tokens, icon: Icon, title: &str, sub: &str) -> b
 
 fn recents(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     heading(ui, t, tr("Recents"));
-    let (mut new_file, mut new_board, mut open) = (false, false, false);
+    let (mut new_file, mut new_board, mut new_diagram, mut open) = (false, false, false, false);
     ui.horizontal_wrapped(|ui| {
         new_file = action_card(ui, t, Icon::PenNib, tr("New design file"), tr("Start from a blank canvas"));
         new_board = action_card(ui, t, Icon::Board, tr("New board"), tr("Sticky notes, shapes and connectors"));
+        new_diagram = action_card(ui, t, Icon::Diagram, tr("New diagram"), tr("Flowcharts from shapes and arrows"));
         open = action_card(ui, t, Icon::Page, tr("Open file"), tr("Open .figcraft, .svg or images"));
     });
     if new_file || new_board {
         app.run(if new_board { "file.newBoard" } else { "file.new" }, json!({}));
         app.ui.home = false;
+    }
+    // The start dialog; the home screen stays behind it until Create.
+    if new_diagram {
+        app.run("dialog.newDiagram", json!({}));
     }
     if open {
         app.open_dialog();

@@ -48,7 +48,7 @@ fn area_id() -> egui::Id {
 }
 
 /// A template's picture: the template built on a board of its own and drawn small.
-fn picture(ctx: &egui::Context, id: &str) -> Option<egui::TextureHandle> {
+pub(crate) fn picture(ctx: &egui::Context, id: &str) -> Option<egui::TextureHandle> {
     let doc = figcraft_engine::board_templates::preview(id).ok()?;
     let layers = doc.node(doc.first_page()?)?.children.clone();
     let b = layers.iter().filter_map(|l| figcraft_render::export_bounds(&doc, *l)).reduce(|a, b| a.union(b))?;

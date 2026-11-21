@@ -11,6 +11,7 @@
 pub mod board;
 mod board_mindmap;
 mod board_route;
+pub mod class_diagram;
 pub mod colors;
 pub mod comments;
 pub mod facilitation;
@@ -23,6 +24,7 @@ pub mod props;
 pub mod proto;
 pub mod styles;
 pub mod text;
+pub mod use_case;
 pub mod vector;
 pub mod vector_faces;
 pub mod vector_regions;
@@ -196,6 +198,10 @@ pub struct Document {
     /// A design file or a board (files from before boards are design files).
     #[serde(default, skip_serializing_if = "FileKind::is_design")]
     pub kind: FileKind,
+    /// How a board is presented (a diagram, or a plain board). Kept only in the native file and
+    /// not sent to live sessions: others see a plain board.
+    #[serde(default, skip_serializing_if = "BoardStyle::is_plain")]
+    pub board_style: BoardStyle,
     /// Page ids in order.
     pub pages: Vec<NodeId>,
     nodes: imbl::OrdMap<NodeId, Arc<Node>>,
@@ -250,6 +256,14 @@ pub struct Document {
     /// Ended votes' results kept in the file, oldest first (at most [`VOTE_HISTORY_MAX`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vote_history: Vec<VoteRecord>,
+    /// Use Case diagram pages, by page: each one's model (see [`use_case`]). The page's diagram
+    /// layers are generated from it and carry [`use_case::LAYER_KEY`] in their plugin data.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "use_case::bounded::pages")]
+    pub use_cases: use_case::Pages,
+    /// Class diagram pages, by page: each one's model (see [`class_diagram`]). The page's layers
+    /// are generated from it and carry [`class_diagram::LAYER_KEY`] in their plugin data.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "class_diagram::bounded::pages")]
+    pub class_diagrams: class_diagram::Pages,
 }
 
 impl Default for Document {
@@ -273,6 +287,7 @@ impl Document {
         Self {
             name: name.into(),
             kind: FileKind::Design,
+            board_style: BoardStyle::Plain,
             pages: Vec::new(),
             nodes: imbl::OrdMap::new(),
             dirty: Dirty::default(),
@@ -293,6 +308,8 @@ impl Document {
             vote: None,
             votes: BTreeMap::new(),
             vote_history: Vec::new(),
+            use_cases: BTreeMap::new(),
+            class_diagrams: BTreeMap::new(),
         }
     }
 
@@ -568,6 +585,9 @@ impl Document {
             if self.current_page == Some(id) {
                 self.current_page = self.pages.first().copied();
             }
+            // A typed page's model goes with it, in the same step.
+            self.use_cases.remove(&id);
+            self.class_diagrams.remove(&id);
         }
         if let Some(parent) = parent
             && let Some(p) = self.node_mut(parent)
@@ -1231,6 +1251,65 @@ impl Document {
             self.current_page = self.pages.first().copied();
         }
         self.link_layer_text_styles();
+        // A Use Case model belongs to a page.
+        self.use_cases.retain(|k, _| self.nodes.get(k).is_some_and(|n| n.is_page()));
+        self.class_diagrams.retain(|k, _| self.nodes.get(k).is_some_and(|n| n.is_page()));
+    }
+
+    /// The first Use Case model that isn't valid, as a message (`None` when all are). A file
+    /// holding one is refused rather than repaired: its diagram can't be guessed.
+    pub fn use_case_problem(&self) -> Option<String> {
+        self.use_cases.iter().find_map(|(page, m)| {
+            if !self.nodes.get(page).is_some_and(|n| n.is_page()) {
+                return Some(format!("a Use Case diagram belongs to page {page}, which isn't in the file"));
+            }
+            use_case::validate(m).err().map(|e| format!("the Use Case diagram on page {page}: {e}"))
+        })
+    }
+
+    /// The first Class diagram model that isn't valid, or that shares its page with a Use Case
+    /// model (a page holds one model), as a message (`None` when all are fine). Refused, not
+    /// repaired, like [`Self::use_case_problem`].
+    pub fn class_diagram_problem(&self) -> Option<String> {
+        self.class_diagrams.iter().find_map(|(page, m)| {
+            if !self.nodes.get(page).is_some_and(|n| n.is_page()) {
+                return Some(format!("a Class diagram belongs to page {page}, which isn't in the file"));
+            }
+            if self.use_cases.contains_key(page) {
+                return Some(format!("page {page} holds both a Use Case and a Class diagram"));
+            }
+            class_diagram::validate(m).err().map(|e| format!("the Class diagram on page {page}: {e}"))
+        })
+    }
+
+    /// The document holds a typed diagram record (a Use Case or Class diagram model). Typed diagrams are a
+    /// preview: the native format can't keep them yet, so nothing writes them to a file.
+    ///
+    /// The typed diagram maps (page id → model) are read in four places: here, [`Self::is_typed_page`],
+    /// [`Self::typed_model_id`] and [`Self::typed_pages`]. A new typed kind (`class_diagrams`) adds
+    /// its map to each of them; the writers, the edit gate and the sharing refusal follow.
+    pub fn has_typed_records(&self) -> bool {
+        !self.use_cases.is_empty() || !self.class_diagrams.is_empty()
+    }
+
+    /// `page` is a typed diagram page (it has a model): its layers are generated from the model,
+    /// so ordinary layers can't be added to it.
+    pub fn is_typed_page(&self, page: NodeId) -> bool {
+        self.use_cases.contains_key(&page) || self.class_diagrams.contains_key(&page)
+    }
+
+    /// The pages with a typed diagram model, of every kind.
+    pub fn typed_pages(&self) -> Vec<NodeId> {
+        self.use_cases.keys().chain(self.class_diagrams.keys()).copied().collect()
+    }
+
+    /// Which model object `page` has (its address; `None`: no model): two documents give the same
+    /// answer for a page only while no command has replaced its model.
+    pub fn typed_model_id(&self, page: NodeId) -> Option<*const ()> {
+        match self.use_cases.get(&page) {
+            Some(m) => Some(Arc::as_ptr(m).cast::<()>()),
+            None => self.class_diagrams.get(&page).map(|m| Arc::as_ptr(m).cast::<()>()),
+        }
     }
 
     /// Text layers linked to a text style whose chars carry no link (files from before per-char
@@ -1329,6 +1408,8 @@ mod board_shape_tests;
 #[cfg(test)]
 mod boolean_hit_tests;
 #[cfg(test)]
+mod class_diagram_tests;
+#[cfg(test)]
 mod client_id_tests;
 #[cfg(test)]
 mod colors_tests;
@@ -1354,6 +1435,8 @@ mod proto_expr_tests;
 mod proto_overlay_anchor_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod use_case_tests;
 #[cfg(test)]
 mod vector_radius_tests;
 #[cfg(test)]

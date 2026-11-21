@@ -67,11 +67,18 @@ fn what_passes_the_total_is_left_out_with_a_note() {
     assert_eq!(loaded.doc.images.len(), 1);
     assert_eq!(loaded.images_past_budget, 1, "kept in the file, so saving over it is refused");
     assert!(loaded.issues.iter().any(|i| i.contains("the file's contents together pass")), "{:?}", loaded.issues);
-    // Room for the document, the images and the index, not the snapshot: the version is skipped.
+    // The version history no longer fits either: it stays in the file unread, and is counted so
+    // saving over the file is refused (it would erase the history).
+    assert!(loaded.versions.is_empty());
+    assert_eq!(loaded.history_past_budget, 1);
+    assert!(loaded.issues.iter().any(|i| i.contains("the version history in `versions` wasn't loaded")), "{:?}", loaded.issues);
+    // Room for the document, the images and the index, not the snapshot: the version stays,
+    // unread (its diagram status unknown), so the file can't be saved over until it's deleted.
     let loaded = load_limited(&bytes, IMAGE_BUDGET, doc + a + b + index).unwrap();
     assert_eq!(loaded.doc.images.len(), 2);
-    assert!(loaded.versions.is_empty());
-    let note = loaded.issues.iter().find(|i| i.contains("version `v1` was skipped")).unwrap();
+    assert_eq!(loaded.versions.len(), 1);
+    assert!(loaded.versions[0].has_typed_records().is_err());
+    let note = loaded.issues.iter().find(|i| i.contains("version `v1` can't be read")).unwrap();
     assert!(note.contains("the file's contents together pass"), "{note}");
 }
 
@@ -115,4 +122,24 @@ fn a_read_that_fails_part_way_still_spends_the_total() {
     assert!(total.read(&mut z, "snapshots/v1.json", 1 << 20).is_err(), "the damaged member fails");
     let again = total.read(&mut z, "snapshots/v1.json", 1 << 20).unwrap_err().to_string();
     assert!(again.contains("together pass"), "the second read is refused for the total, not read again: {again}");
+}
+
+#[test]
+fn a_branch_part_past_the_total_stays_in_the_file_and_the_file_still_opens() {
+    let doc = serde_json::to_vec(&to_json(&Document::new("Crafted")).unwrap()).unwrap();
+    let index = br#"{"branches": [{"id": "b1", "name": "Idea", "time": 0, "client": 1, "state": "active"}]}"#.to_vec();
+    let members = vec![
+        ("document.json".to_string(), doc.clone()),
+        (crate::BRANCH_INDEX.to_string(), index.clone()),
+        ("branches/b1/base.json".to_string(), doc.clone()),
+        ("branches/b1/head.json".to_string(), doc.clone()),
+    ];
+    let bytes = zip_of(&members);
+    // Room for the document, the index and the base, not the head.
+    let total = (doc.len() * 2 + index.len()) as u64;
+    let loaded = load_limited(&bytes, IMAGE_BUDGET, total).unwrap();
+    assert!(loaded.branches.is_empty());
+    assert_eq!(loaded.history_past_budget, 1, "{:?}", loaded.issues);
+    assert!(loaded.issues.iter().any(|i| i.contains("branch `b1` wasn't loaded")), "{:?}", loaded.issues);
+    let _ = MAX_UNPACKED;
 }

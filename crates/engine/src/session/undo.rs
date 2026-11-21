@@ -79,6 +79,16 @@ impl Session {
             if doc == *ds.doc && sel == ds.selection {
                 return res;
             }
+            // A gesture keeps a typed diagram page in step with its model, like a command does: a
+            // refused preview is never shown, and the gesture ends with the document as it was.
+            if let Err(why) = crate::use_case::gate::check_edit(&it.doc, &doc) {
+                ds.doc = it.doc;
+                ds.selection = it.selection;
+                ds.interaction = None;
+                ds.revision += 1;
+                self.tool.gesture = crate::canvas::tools::Gesture::None;
+                return Err(EngineError::Disabled(it.label, why));
+            }
             ds.doc = Arc::new(doc);
             ds.selection = sel;
             ds.clean_selection();
@@ -93,6 +103,13 @@ impl Session {
         let Some(it) = ds.interaction.take() else { return Ok(()) };
         let (uid, page) = (ds.uid, ds.page);
         ds.revision += 1;
+        // What a gesture's last steps did outside `preview` (a frame taking the layers it encloses)
+        // is checked too: a refused gesture leaves no step and the document as it was.
+        if let Err(why) = crate::use_case::gate::check_edit(&it.doc, &ds.doc) {
+            ds.doc = it.doc;
+            ds.selection = it.selection;
+            return Err(EngineError::Disabled(it.label, why));
+        }
         if !Arc::ptr_eq(&it.doc, &ds.doc) && *it.doc != *ds.doc {
             self.record(uid, Some(&it.label), it.doc, it.selection, page);
         } else {
@@ -119,9 +136,15 @@ impl Session {
             return Ok(true);
         }
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
+        let connecting = self.ds().is_ok_and(|d| self.live.iter().any(|l| l.doc_uid == Some(d.uid)));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {
             return Err(EngineError::Disabled("edit.undo".into(), PREVIEW_READ_ONLY.into()));
+        }
+        // While a session is being set up the local history still applies: a step back to a
+        // typed diagram would put it in the session, so it is refused and kept.
+        if connecting && !live && ds.history.undo.last().is_some_and(|e| e.doc.has_typed_records()) {
+            return Err(EngineError::Disabled("edit.undo".into(), crate::use_case::gate::SHARING_REFUSAL.into()));
         }
         if let Some(it) = ds.interaction.take()
             && live
@@ -161,9 +184,13 @@ impl Session {
             return Ok(true);
         }
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
+        let connecting = self.ds().is_ok_and(|d| self.live.iter().any(|l| l.doc_uid == Some(d.uid)));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {
             return Err(EngineError::Disabled("edit.redo".into(), PREVIEW_READ_ONLY.into()));
+        }
+        if connecting && !live && ds.history.redo.last().is_some_and(|e| e.doc.has_typed_records()) {
+            return Err(EngineError::Disabled("edit.redo".into(), crate::use_case::gate::SHARING_REFUSAL.into()));
         }
         if let Some(it) = ds.interaction.take()
             && live

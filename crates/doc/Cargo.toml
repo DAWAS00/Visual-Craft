@@ -16,3 +16,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 imbl = { workspace = true }
 unicode-segmentation = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

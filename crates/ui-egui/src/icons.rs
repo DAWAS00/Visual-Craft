@@ -215,6 +215,8 @@ icons! {
     PenNib,
     /// A board file (and the sticky note tool): a note with its bottom corner folded up.
     Board,
+    /// A diagram file: a box joined to two boxes below it by a branching line.
+    Diagram,
     /// Board templates: a board laid out in blocks, a note and lines of text. A table: a grid.
     /// The table bar's rows and columns: a strip with a plus or a minus beyond its end.
     Templates,
@@ -319,6 +321,15 @@ pub fn file_mark(kind: figcraft_doc::FileKind) -> Icon {
     match kind {
         figcraft_doc::FileKind::Design => Icon::PenNib,
         figcraft_doc::FileKind::Board => Icon::Board,
+    }
+}
+
+/// The mark of an open document on its tab: a diagram's own mark, otherwise its kind's.
+pub fn doc_mark(doc: &figcraft_doc::Document) -> Icon {
+    if doc.kind == figcraft_doc::FileKind::Board && doc.board_style == figcraft_doc::BoardStyle::Diagram {
+        Icon::Diagram
+    } else {
+        file_mark(doc.kind)
     }
 }
 

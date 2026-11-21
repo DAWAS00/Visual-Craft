@@ -148,11 +148,72 @@ pub fn try_import_with(bytes: &[u8], variables: Option<&Value>, images: ImageRes
     if !src.contains("\"document\"") {
         return None;
     }
+    // The top-level keys first, in a streaming pass that decodes no value: a native file (its
+    // `format` header) or JSON without a `document` or `nodes` key isn't REST JSON, and is left
+    // to its own reader without being decoded here.
+    // Native JSON with typed diagram records (even without its `format` header) is never decoded
+    // here: the native reader refuses it. The probe reads no record, and one whose `use_cases`
+    // has a shape no REST file has isn't REST JSON either.
+    let typed = crate::typed_probe::typed(bytes);
+    if typed == Ok(true) {
+        return None;
+    }
+    match top_level_keys(src) {
+        Ok(keys) if typed.is_err() || keys.format || !(keys.document || keys.nodes) => return None,
+        Ok(_) => {}
+        // Broken JSON that names a DOCUMENT root: report it as such.
+        Err(e) => return src.contains("\"DOCUMENT\"").then(|| Err(FormatError::Corrupt(format!("REST API file JSON: {e}")))),
+    }
     match serde_json::from_str::<Value>(src) {
         Ok(v) => is_rest_json(&v).then(|| import_with(&v, variables, images)),
-        // Broken JSON that names a DOCUMENT root: report it as such.
         Err(e) => src.contains("\"DOCUMENT\"").then(|| Err(FormatError::Corrupt(format!("REST API file JSON: {e}")))),
     }
+}
+
+/// Which of the keys that tell a REST response from a native file a JSON object has at its top.
+#[derive(Default)]
+struct TopKeys {
+    format: bool,
+    document: bool,
+    nodes: bool,
+}
+
+/// [`TopKeys`] of `src`, read without decoding any value (each is skipped).
+fn top_level_keys(src: &str) -> Result<TopKeys, serde_json::Error> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+    #[derive(serde::Deserialize)]
+    #[serde(field_identifier, rename_all = "lowercase")]
+    enum Key {
+        Format,
+        Document,
+        Nodes,
+        #[serde(other)]
+        Other,
+    }
+    struct Top;
+    impl<'de> Visitor<'de> for Top {
+        type Value = TopKeys;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<TopKeys, A::Error> {
+            let mut keys = TopKeys::default();
+            while let Some(k) = m.next_key::<Key>()? {
+                match k {
+                    Key::Format => keys.format = true,
+                    Key::Document => keys.document = true,
+                    Key::Nodes => keys.nodes = true,
+                    Key::Other => {}
+                }
+                m.next_value::<IgnoredAny>()?;
+            }
+            Ok(keys)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_str(src);
+    let keys = (&mut de).deserialize_map(Top)?;
+    de.end()?;
+    Ok(keys)
 }
 
 /// Build a document from a parsed REST API file (or nodes) response. Returns it with the

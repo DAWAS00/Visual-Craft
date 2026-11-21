@@ -117,6 +117,9 @@ pub fn specs() -> Vec<CommandSpec> {
                     .collect();
                 *pr = prototype;
             }
+            // A Use Case page's copy gets its own model, and layers generated from it.
+            crate::use_case::duplicate_page(doc, src, np)?;
+            crate::class_diagram::duplicate_page(doc, src, np)?;
             // Keep the new page right after the source.
             if let Some(si) = doc.pages.iter().position(|x| *x == src) {
                 doc.pages.retain(|x| *x != np);

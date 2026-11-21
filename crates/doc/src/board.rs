@@ -33,6 +33,32 @@ impl FileKind {
     }
 }
 
+/// How a board is presented. A diagram is stored as a board (its layers are board objects, so
+/// saving, undo and live sessions treat it as one) and only the UI shows it differently: its mark,
+/// the start dialog and, later, the shape library. Older versions of FigCraft open a diagram as a
+/// plain board, and a style this version doesn't know reads as [`BoardStyle::Plain`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BoardStyle {
+    Diagram,
+    /// Last, as serde's fallback for a style this version doesn't know.
+    #[default]
+    #[serde(other)]
+    Plain,
+}
+
+impl BoardStyle {
+    pub fn is_plain(&self) -> bool {
+        *self == BoardStyle::Plain
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            BoardStyle::Plain => "plain",
+            BoardStyle::Diagram => "diagram",
+        }
+    }
+}
+
 /// What a board object is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]

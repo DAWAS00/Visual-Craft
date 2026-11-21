@@ -484,6 +484,18 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("pref.uiScaleReset", "Default interface size", "{}  back to the system's own size (1) → {scale}", false, |s, _| ui_scale_step(s, 0)),
         spec!("pref.autoSave", "Save files automatically", "{on?}", false, |s, p| pref(s, p, |x| &mut x.auto_save)),
         spec!("pref.startOnHome", "Start on the Home screen", "{on?}", false, |s, p| pref(s, p, |x| &mut x.start_on_home)),
+        spec!(
+            "pref.diagramPreview",
+            "Preview typed diagrams",
+            "{on?}  lets New diagram make Use Case and Class diagrams (a preview); no `on` toggles → {on}",
+            false,
+            |s, p| {
+                let on = boolean(p, "on").unwrap_or(!s.prefs.diagram_preview_on());
+                s.prefs.diagram_preview = Some(on);
+                s.prefs_unsaved = true;
+                Ok(json!({"on": on}))
+            }
+        ),
         spec!("pref.nudge", "Nudge amount", "{small?, big?}", false, |s, p| {
             s.prefs.nudge_small = num(p, "small").unwrap_or(s.prefs.nudge_small).clamp(0.01, 1000.0);
             s.prefs.nudge_big = num(p, "big").unwrap_or(s.prefs.nudge_big).clamp(0.01, 10000.0);
